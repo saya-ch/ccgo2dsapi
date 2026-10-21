@@ -291,7 +291,7 @@ export async function consumeStream(stream, opts = {}) {
   let stopReason;
   let systemPromptTokens;
 
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
 
   const finalizeThinking = () => {
     if (thinkingOpen) {
@@ -372,6 +372,8 @@ export async function consumeStream(stream, opts = {}) {
         usage.outputTokens = u.outputTokens ?? 0;
         usage.cacheReadTokens = u.inputTokenDetails?.cacheReadTokens ?? 0;
         usage.cacheWriteTokens = u.inputTokenDetails?.cacheWriteTokens ?? 0;
+        // 上游 finish 里 outputTokenDetails.reasoningTokens 是真实推理 token 数
+        usage.reasoningTokens = u.outputTokenDetails?.reasoningTokens ?? u.reasoningTokens ?? 0;
       }
       rawFinishReason = ev.rawFinishReason ?? ev.finishReason;
       stopReason = ev.finishReason === "tool-calls" ? "tool_calls"
