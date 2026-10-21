@@ -6,8 +6,8 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "patch": "node tools/patch-reasoning.mjs && node tools/patch-parity.mjs && node tools/patch-anthropic.mjs",
-    "patch:check": "node tools/patch-reasoning.mjs --check && node tools/patch-parity.mjs --check && node tools/patch-anthropic.mjs --check",
+    "patch": "node tools/patch-reasoning.mjs && node tools/patch-parity.mjs && node tools/patch-anthropic.mjs && node tools/patch-alias.mjs",
+    "patch:check": "node tools/patch-reasoning.mjs --check && node tools/patch-parity.mjs --check && node tools/patch-anthropic.mjs --check && node tools/patch-alias.mjs --check",
     "patch:restore": "node tools/patch-anthropic.mjs --restore && node tools/patch-parity.mjs --restore && node tools/patch-reasoning.mjs --restore",
     "verify": "node tools/verify-all.mjs",
     "verify:openai": "node tools/verify-parity.mjs",

@@ -70,7 +70,7 @@ npm run verify                # 三套协议对齐验证
 
 API Key 填 `proxy-managed`（哨兵值，代理替换成 `auth.json` 里的真实密钥）。填别的值会被当作你自己的密钥转发上游，返回 401。
 
-模型名用 `deepseek-v4-flash`（也可写 `deepseek-flash`，官方推荐名）。`/v1/models` 会列出全部可用模型及上下文窗口。
+模型名可写 `deepseek-v4-flash`、`deepseek-v4.1-flash` 或 `deepseek-flash`。按官方文档，`deepseek-flash` 指向 **V4.1-Flash**，本项目对齐这一语义；`deepseek-v4-flash` 与 `deepseek-v4.1-flash` 是上游两个独立模型，各自可直接调用。`/v1/models` 会列出全部可用模型及上下文窗口。
 
 ## 客户端
 

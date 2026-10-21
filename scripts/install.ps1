@@ -82,7 +82,7 @@ if ($SkipNpm) {
   Push-Location $root
   try {
     # 必须先跑 reasoning 补丁（改 openai.js），再跑 parity 补丁（改 server.js）
-    foreach ($ps in @("tools\patch-reasoning.mjs", "tools\patch-parity.mjs", "tools\patch-anthropic.mjs")) {
+    foreach ($ps in @("tools\patch-reasoning.mjs", "tools\patch-parity.mjs", "tools\patch-anthropic.mjs", "tools\patch-alias.mjs")) {
       $patchScript = Join-Path $root $ps
       if (-not (Test-Path $patchScript)) {
         Write-Host "  ! $ps not found, skipped" -ForegroundColor Yellow
