@@ -35,7 +35,15 @@ The Command Code Go plan costs **$1/month**. Their own wording is "Your $1 buys 
 | Weekly | $6 |
 | Monthly | $10 |
 
-For reference, DeepSeek's own pricing ([Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing)) for Flash is ¥0.02 per million input tokens on a cache hit, ¥1 on a miss, and ¥4 for output, during off-peak hours (peak doubles it). $10 of credits works out to roughly **tens of millions of tokens per month**, which would cost $10 directly from the official API.
+For reference, DeepSeek's own list price ([Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing)) for Flash, per million tokens, off-peak:
+
+| Item | Off-peak | Peak |
+|---|---|---|
+| Input, cache hit | $0.003 | $0.006 |
+| Input, cache miss | $0.15 | $0.30 |
+| Output | $0.60 | $1.20 |
+
+At the cache-miss input rate, $10 of credits is about **66 million tokens per month**; at the output rate, about 16 million. Bought directly from the official API, that volume costs $10.
 
 In short: **$1 buys the official $10 of DeepSeek usage**. The trade-off is that traffic runs through Command Code's channel under plan rate limits, not DeepSeek's own infrastructure.
 

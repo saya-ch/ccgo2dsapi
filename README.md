@@ -35,7 +35,15 @@ Command Code 的 Go 套餐是 **$1 / 月**，官方原话是「Your $1 buys $10 
 | 每周 | $6 |
 | 每月 | $10 |
 
-对照 DeepSeek 官方 API 的定价（[模型 & 价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)），Flash 模型百万 token 输入缓存命中 ¥0.02、未命中 ¥1、输出 ¥4（空闲时段；高峰翻倍）。换算下来，$10 额度大致对应**千万级 token 的月用量**，而同样的量在官方 API 需要实付 $10。
+对照 DeepSeek 官方定价（[模型 & 价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)），Flash 每百万 token 空闲时段 $0.003（缓存命中）/ $0.15（未命中）/ $0.60（输出），高峰时段翻倍：
+
+| 项 | 空闲 | 高峰 |
+|---|---|---|
+| 输入 · 缓存命中 | $0.003 / 1M | $0.006 / 1M |
+| 输入 · 未命中 | $0.15 / 1M | $0.30 / 1M |
+| 输出 | $0.60 / 1M | $1.20 / 1M |
+
+按未命中输入算，$10 额度约合 **6600 万 token 的月用量**；纯输出则约 1600 万。同样的量在官方 API 需要实付 $10。
 
 也就是说：**花 $1 拿到官方 $10 的 DeepSeek 用量**，代价是走 Command Code 的通道、受套餐窗口限速，而不是直连 DeepSeek 的机房。
 
