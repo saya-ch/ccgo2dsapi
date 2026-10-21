@@ -19,7 +19,8 @@
   <a href="#额度面板">额度面板</a> ·
   <a href="#配置">配置</a> ·
   <a href="#安全">安全</a> ·
-  <a href="#故障排查">故障排查</a>
+  <a href="#故障排查">故障排查</a> ·
+  <a href="README.en.md">English</a>
 </p>
 
 把 [DeepSeek 官方 API](https://api-docs.deepseek.com/zh-cn/) 的三套协议搬到本地，后端是 Command Code Go 套餐：改一个 `base_url` 就能用，行为按官方文档逐项实测对齐。
