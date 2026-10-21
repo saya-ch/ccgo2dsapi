@@ -1,0 +1,45 @@
+{
+  "_comment": "ccgo2dsapi 配置 —— 本项目只面向 DeepSeek 模型。复制成 config.json 后按需修改；config.json 已在 .gitignore 里。",
+
+  "Port": 8787,
+  "HostAddress": "127.0.0.1",
+  "ProxyPackage": "commandcode-api-proxy",
+  "AuthFile": "%USERPROFILE%\\.commandcode\\auth.json",
+  "LogLevel": "info",
+
+  "Upstream": {
+    "ApiBase": "https://api.commandcode.ai",
+    "ModelsPath": "/provider/v1/models",
+    "CreditsPath": "/alpha/billing/credits",
+    "SubscriptionPath": "/alpha/billing/subscriptions",
+    "PlanPageUrl": "https://commandcode.ai/docs/plans/go",
+    "CliVersion": "",
+    "CliVersionRegistry": "https://registry.npmjs.org/command-code/latest"
+  },
+
+  "Panel": {
+    "_comment": "ModelFilter 是正则，只匹配 DeepSeek 系列；本项目不针对其它厂商模型做适配。",
+    "ModelFilter": "^deepseek/",
+    "_comment_speed": "留空数组 = 测全部匹配到的模型；填具体 ID 则只测这几个。测速仅由面板 T 键手动触发，启动时不执行，每个模型每次测速消耗一次小额请求。",
+    "SpeedTestModels": [],
+    "TpsGood": 250,
+    "TpsLow": 120
+  },
+
+  "_comment_responses": "Responses API 走独立端口，内部转发到上面的 Port。Enabled 设为 false 可关闭。",
+  "Responses": {
+    "Enabled": true,
+    "Port": 8788
+  },
+
+  "_comment_plan": "月额度总额按 planId 映射（服务端不下发总额）。Go 套餐为 $10。",
+  "PlanCredits": {
+    "individual-go": 10,
+    "individual-go-v1": 10
+  },
+
+  "PlanNames": {
+    "individual-go": "Go",
+    "individual-go-v1": "Go"
+  }
+}
