@@ -167,10 +167,11 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
       msg = j.error?.message || j.message || text;
       code = j.error?.code || null;
     } catch { }
-    const err = new Error(msg.slice(0, 500));
+    const msgText = typeof msg === "string" ? msg : JSON.stringify(msg ?? "");
+    const err = new Error(msgText.slice(0, 500));
     err.status = res.status;
     err.code = code;
-    err.retryable = isRetryableStatus(res.status) && !hasTerminalMarker(msg);
+    err.retryable = isRetryableStatus(res.status) && !hasTerminalMarker(msgText);
     throw err;
   }
 
@@ -198,9 +199,24 @@ function makeAbortChannel(res) {
  * 所有流式输出都走这里，断开后直接跳过，不制造未捕获异常。
  */
 function safeWrite(res, chunk) {
+  // ServerResponse 在 destroyed 之后 write 会异步 emit 'error'
+  // (ERR_STREAM_DESTROYED)。没有监听器的话会升级成 uncaughtException，
+  // 单进程网关直接退出。
+  if (!res.__ccgoErrHooked) {
+    res.__ccgoErrHooked = true;
+    res.on("error", () => { });
+  }
   if (res.writableEnded || res.destroyed) return false;
   try {
-    res.write(chunk);
+    // res.write 返回 false 表示写缓冲已满。这里不 await drain（那会阻塞
+    // 上游读取），但记录下来：持续积压说明客户端太慢，继续读上游只会
+    // 让内存无界增长。
+    const ok = res.write(chunk);
+    if (!ok) {
+      res.__ccgoBacklog = (res.__ccgoBacklog || 0) + 1;
+    } else {
+      res.__ccgoBacklog = 0;
+    }
     return true;
   } catch {
     return false;
@@ -295,7 +311,9 @@ const MODEL_ALIASES = {
 };
 
 function resolveModel(m) {
-  if (!m || typeof m !== "string") return "deepseek/deepseek-v4.1-flash";
+  // 非字符串（number/object/null）一律回落到默认模型，不要在这里抛
+  // TypeError —— 那是 500，而实际情况应该是 400 或直接用默认值。
+  if (typeof m !== "string" || !m) return "deepseek/deepseek-v4.1-flash";
 
   // Claude Code 用 model[1M] 声明上下文窗口，这是它自己的语法，
   // 不能原样发给上游。剥掉后再解析。
@@ -390,6 +408,11 @@ async function handleOpenAI(req, res) {
     for await (const ev of readEvents(upstream.body)) {
       // A4: 客户端断开后停止消费，不再向上游要数据
       if (res.writableEnded || res.destroyed) break;
+      // B5: 客户端持续跟不上，放弃这条流，避免内存无界增长
+      if ((res.__ccgoBacklog || 0) > 5) {
+        log("client too slow, dropping stream");
+        break;
+      }
       if (ev.type === "abort") { sawAbort = true; continue; }
       if (ev.type === "text-delta" && ev.text) {
         emit(chunk({ content: ev.text }));
@@ -1060,6 +1083,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// 单进程网关崩了就全停了，这里兜住最后一道。
+// 记录后继续运行：单次请求出错不该带走整个服务。
+process.on("unhandledRejection", (reason) => {
+  log("unhandledRejection: " + (reason && reason.stack ? reason.stack : String(reason)));
+});
+process.on("uncaughtException", (err) => {
+  log("uncaughtException: " + (err && err.stack ? err.stack : String(err)));
+});
+
 server.on("error", (e) => {
   if (e.code === "EADDRINUSE") {
     logError(`端口 ${PORT} 已被占用`);
@@ -1068,6 +1100,17 @@ server.on("error", (e) => {
   }
   process.exit(1);
 });
+
+// B7: 绑到 0.0.0.0 时任何能连到端口的人都能免费用本账号的上游额度。
+// 这不是错误（用户可能有正当需求），但必须让人看见。
+const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
+if (!LOOPBACK.has(HOST)) {
+  console.warn("");
+  console.warn("  ! 警告：网关绑定在 " + HOST + "，不是回环地址。");
+  console.warn("    任何能访问该地址的人都会消耗本账号的 Command Code 额度。");
+  console.warn("    如非必要请改回 127.0.0.1。");
+  console.warn("");
+}
 
 server.listen(PORT, HOST, () => {
   log(`listening on http://${HOST}:${PORT}`);
