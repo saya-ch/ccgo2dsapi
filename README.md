@@ -60,6 +60,10 @@ commandcode login          # 登录 CLI，生成 auth.json
 npm run verify                # 三套协议对齐验证
 ```
 
+<p align="center">
+  <img src="assets/brand/panel.jpg" alt="额度面板：连接地址、模型清单与实测 TPS、三窗口额度" width="62%">
+</p>
+
 ## 接口
 
 | 协议 | 本地地址 | 官方文档 |
@@ -164,10 +168,6 @@ PASS  Responses                差异 0
 官方本身标注为「忽略」的字段，本项目同样忽略、不报错。这类字段在各协议官方文档的兼容性小节里都有列表，实现时逐条对齐，未额外增减。
 
 ## 额度面板
-
-<p align="center">
-  <img src="assets/brand/panel.jpg" alt="额度面板：连接地址、模型清单与实测 TPS、三窗口额度" width="88%">
-</p>
 
 启动后显示静态面板，不自动刷新。测速**不自动执行**——TPS 栏启动时为 `-`，按 `T` 才测，因为每次测速都消耗额度。
 
