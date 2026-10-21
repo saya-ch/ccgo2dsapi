@@ -90,6 +90,46 @@ function log(...a) {
   writeLine("[gateway] " + a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
 }
 
+// ── 请求日志 ──────────────────────────────────────────────
+// 每请求一行 JSON Lines，用于回溯「哪个模型、多少 token、耗时多久」。
+// 额度异常、慢请求、幻觉排查都需要这个，也是做 usage 聚合的前提。
+const REQ_LOG_FILE = (() => {
+  const v = argOf("--request-log", "");
+  if (v === "off" || v === "false") return null;
+  if (v) return v;
+  return null; // 默认关闭，避免无意间写出大文件
+})();
+
+let reqLogStream = null;
+if (REQ_LOG_FILE) {
+  try {
+    reqLogStream = fs.createWriteStream(REQ_LOG_FILE, { flags: "a" });
+    reqLogStream.on("error", () => { reqLogStream = null; });
+  } catch { reqLogStream = null; }
+}
+
+/**
+ * 记录一次请求。字段尽量少而有用：
+ *   ts / protocol / model / stream / status / in / out / reasoning / ttft_ms / ms
+ */
+function logRequest(o) {
+  if (!reqLogStream) return;
+  const rec = {
+    ts: new Date().toISOString(),
+    protocol: o.protocol,
+    model: o.model,
+    stream: !!o.stream,
+    status: o.status ?? null,
+    in: o.in ?? null,
+    out: o.out ?? null,
+    reasoning: o.reasoning ?? null,
+    ttft_ms: o.ttftMs ?? null,
+    ms: o.ms ?? null,
+    ...(o.error ? { error: String(o.error).slice(0, 200) } : {}),
+  };
+  try { reqLogStream.write(JSON.stringify(rec) + "\n"); } catch { }
+}
+
 function logError(...a) {
   writeLine("[gateway] " + a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
 }
@@ -152,22 +192,48 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
     cliEnvironment: "production",
   });
 
-  const res = await fetchWithTimeout(
-    API_BASE + ROUTE_GENERATE,
-    { method: "POST", headers, body: JSON.stringify(body), signal },
-    TIMEOUT_MS
-  );
+  // 429 / 5xx 做指数退避重试：窗口刚重置时的瞬时限速不该直接暴露给用户。
+  // 终态错误（额度耗尽、模型不在套餐内）不重试 —— hasTerminalMarker 判定。
+  const MAX_RETRIES = Number(argOf("--retries", "2"));
+  let res;
+  let lastText = "";
+  let lastMsg = "";
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    res = await fetchWithTimeout(
+      API_BASE + ROUTE_GENERATE,
+      { method: "POST", headers, body: JSON.stringify(body), signal },
+      TIMEOUT_MS
+    );
+
+    if (res.ok) break;
+
+    lastText = await res.text().catch(() => "");
+    lastMsg = lastText;
+    try {
+      const j = JSON.parse(lastText);
+      lastMsg = j.error?.message || j.message || lastText;
+    } catch { }
+
+    const willRetry = isRetryableStatus(res.status)
+      && !hasTerminalMarker(String(lastMsg))
+      && attempt < MAX_RETRIES
+      && !signal?.aborted;
+    if (!willRetry) break;
+
+    // 指数退避 + 抖动，避免并发时同时重试
+    const wait = 400 * Math.pow(2, attempt) + Math.random() * 200;
+    log(`upstream ${res.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(wait)}ms`);
+    await new Promise((r) => setTimeout(r, wait));
+  }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    let msg = text;
     let code = null;
     try {
-      const j = JSON.parse(text);
-      msg = j.error?.message || j.message || text;
+      const j = JSON.parse(lastText);
       code = j.error?.code || null;
     } catch { }
-    const msgText = typeof msg === "string" ? msg : JSON.stringify(msg ?? "");
+    const msgText = typeof lastMsg === "string" ? lastMsg : JSON.stringify(lastMsg ?? "");
     const err = new Error(msgText.slice(0, 500));
     err.status = res.status;
     err.code = code;
@@ -332,8 +398,11 @@ function resolveModel(m) {
   return m;
 }
 
-// ── 模型元数据（实测值）───────────────────────────────────
-const MODEL_META = {
+// ── 模型元数据 ────────────────────────────────────────────
+// 硬编码只是回落值。运行时优先从上游 /provider/v1/models 拉取，
+// 否则面板（实时拉取）和 /v1/models（硬编码）会数据源不一致：
+// 上游新增模型时面板显示、API 不显示。
+const MODEL_META_FALLBACK = {
   "deepseek/deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", ctx: 1000000, vision: true },
   "deepseek/deepseek-v4.1-flash-fast": { name: "DeepSeek V4.1 Flash Fast", ctx: 1000000, vision: true },
   "deepseek/deepseek-v4-flash": { name: "DeepSeek V4 Flash", ctx: 1000000, vision: false },
@@ -341,6 +410,44 @@ const MODEL_META = {
   "deepseek/deepseek-v4-flash-vision-exp": { name: "DeepSeek V4 Flash Vision (exp)", ctx: 1000000, vision: true },
   "deepseek/deepseek-v4-pro": { name: "DeepSeek V4 Pro", ctx: 1000000, vision: false },
 };
+
+/** 运行时模型元数据：启动时从上游拉取，失败则用回落值 */
+let MODEL_META = { ...MODEL_META_FALLBACK };
+let MODEL_META_SOURCE = "fallback";
+
+const VISION_HINTS = /vision|v4\.1|multimodal/i;
+
+async function refreshModelMeta() {
+  try {
+    const apiKey = readApiKey();
+    const { traceId, spanId } = generateTraceIds();
+    const headers = buildHeaders({ authKey: apiKey, cliVersion: CLI_VERSION, traceId, spanId });
+    const r = await fetchWithTimeout(API_BASE + "/provider/v1/models", { method: "GET", headers }, 10000);
+    if (!r.ok) return false;
+    const j = await r.json();
+    const list = Array.isArray(j?.data) ? j.data : [];
+    if (list.length === 0) return false;
+
+    const next = {};
+    for (const m of list) {
+      if (!m?.id || !String(m.id).startsWith("deepseek/")) continue;
+      next[m.id] = {
+        name: m.name || m.displayName || m.id,
+        ctx: m.context_length ?? m.contextLength ?? 1000000,
+        vision: VISION_HINTS.test(String(m.id)),
+      };
+    }
+    if (Object.keys(next).length === 0) return false;
+
+    MODEL_META = next;
+    MODEL_META_SOURCE = "live";
+    log(`model metadata: ${Object.keys(next).length} models from upstream`);
+    return true;
+  } catch (e) {
+    log("model metadata refresh failed, using fallback: " + e.message);
+    return false;
+  }
+}
 
 // ══════════════════════════════════════════════════════════
 // OpenAI Chat Completions
@@ -376,9 +483,16 @@ async function handleOpenAI(req, res) {
   const id = "chatcmpl-" + Math.random().toString(36).slice(2, 14);
   const created = Math.floor(Date.now() / 1000);
 
+  const t0 = Date.now();
+
   if (!stream) {
     const r = await consumeStream(upstream.body);
     const message = wireToOpenAIMessage(r.content);
+    logRequest({
+      protocol: "openai", model, stream: false, status: 200,
+      in: r.usage?.inputTokens, out: r.usage?.outputTokens,
+      reasoning: r.usage?.reasoningTokens, ms: Date.now() - t0,
+    });
     return sendJson(res, 200, {
       id,
       object: "chat.completion",
@@ -453,6 +567,12 @@ async function handleOpenAI(req, res) {
         if (body.stream_options?.include_usage) {
           emit({ id, object: "chat.completion.chunk", created, model, choices: [], usage });
         }
+        logRequest({
+          protocol: "openai", model, stream: true, status: 200,
+          in: u?.inputTokens, out: u?.outputTokens,
+          reasoning: u?.outputTokenDetails?.reasoningTokens ?? u?.reasoningTokens,
+          ms: Date.now() - t0,
+        });
       } else if (ev.type === "error") {
         // A2: 错误后必须立刻停止，且不能再发 [DONE] —— 那等于把失败说成成功
         failed = true;
@@ -521,8 +641,15 @@ async function handleAnthropic(req, res) {
 
   const id = "msg_" + Math.random().toString(36).slice(2, 20);
 
+  const t0 = Date.now();
+
   if (!stream) {
     const r = await consumeStream(upstream.body);
+    logRequest({
+      protocol: "anthropic", model, stream: false, status: 200,
+      in: r.usage?.inputTokens, out: r.usage?.outputTokens,
+      reasoning: r.usage?.reasoningTokens, ms: Date.now() - t0,
+    });
     return sendJson(res, 200, {
       id,
       type: "message",
@@ -670,9 +797,16 @@ async function handleResponses(req, res) {
 
   const respId = newResponseId();
 
+  const t0 = Date.now();
+
   if (!stream) {
     const r = await consumeStream(upstream.body);
     const status = r.stopReason === "max_tokens" ? "incomplete" : "completed";
+    logRequest({
+      protocol: "responses", model, stream: false, status: 200,
+      in: r.usage?.inputTokens, out: r.usage?.outputTokens,
+      reasoning: r.usage?.reasoningTokens, ms: Date.now() - t0,
+    });
     return sendJson(res, 200, makeResponseObject({
       id: respId,
       model,
@@ -999,7 +1133,10 @@ async function handleBalance(res) {
     const w = normalizeWindows(credits);
     const total = w.monthly_credits + w.purchased_credits + w.free_credits;
 
-    // 官方 /user/balance 形状
+    // 官方 /user/balance 是「账户余额」（按量付费语义）。
+    // 本项目背后是订阅制套餐，没有可充值余额 —— 这里返回的是
+    // 「套餐周期内剩余额度」，语义相近但不完全等价。
+    // 客户端应把它当作「还能用多少」，而不是「能退多少」。
     sendJson(res, 200, {
       is_available: true,
       balance_infos: [{
@@ -1111,6 +1248,9 @@ if (!LOOPBACK.has(HOST)) {
   console.warn("    如非必要请改回 127.0.0.1。");
   console.warn("");
 }
+
+// 启动时拉一次模型列表；失败不影响启动，用回落值
+refreshModelMeta().catch(() => { });
 
 server.listen(PORT, HOST, () => {
   log(`listening on http://${HOST}:${PORT}`);

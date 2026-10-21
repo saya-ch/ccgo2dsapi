@@ -22,8 +22,9 @@ function imagesOf(content) {
     if (p && p.type === "input_image") {
       const url = p.image_url ?? p.file_id ?? "";
       if (url) {
-        const mime = /^data:([^;]+);/.exec(url)?.[1] || "image/png";
-        out.push({ type: "image", image: url, mimeType: mime });
+        // 只从 data URL 提取；http(s) 或无扩展名时省略，让上游判断
+        const mime = /^data:([^;]+);/.exec(url)?.[1];
+        out.push({ type: "image", image: url, ...(mime ? { mimeType: mime } : {}) });
       }
     }
   }

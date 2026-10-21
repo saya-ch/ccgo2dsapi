@@ -224,7 +224,21 @@ vendor/
 | 推理 token | 恒为 0 | 从 `outputTokenDetails.reasoningTokens` 提取 |
 | Responses 端口 | 独立 8788 进程 | 与另两套同端口 |
 
-`npm run verify` 对三套协议逐项对齐验证，全部 0 处差异。
+验证分两档：
+
+```powershell
+npm run verify:offline   # 离线：mock 上游，15 项断言，零额度消耗
+npm run verify           # 真实：连上游逐项对齐，3/3 通过，消耗少量额度
+```
+
+改代码后用**离线验证**，它跑的是同一套协议翻译逻辑，只是上游换成本地 mock ——
+不需要凭据、不消耗套餐额度、秒级完成。**真实验证**只在需要确认「与官方对齐」时跑。
+
+```powershell
+npm run mock             # 单独启动 mock 上游（默认 :8799）
+node tools/mock-upstream.mjs --scenario truncated   # 制造流截断场景
+node tools/mock-upstream.mjs --scenario error       # 制造上游错误
+```
 
 除三套协议外还提供两个查询端点：
 
@@ -232,6 +246,15 @@ vendor/
 |---|---|
 | `GET /user/balance` | 官方 `/user/balance` 形状，返回剩余额度 |
 | `GET /user/quota` | 本项目形状，含 5 小时 / 每周窗口的已用、上限、重置时刻 |
+
+需要回溯请求时加 `--request-log <path>`，每请求写一行 JSON Lines：
+
+```json
+{"ts":"2026-10-21T17:56:59Z","protocol":"openai","model":"deepseek/deepseek-v4.1-flash","stream":false,"status":200,"in":35,"out":8,"reasoning":0,"ms":52}
+```
+
+默认关闭。上游 429 / 5xx 会自动指数退避重试 2 次（`--retries` 可调），
+额度耗尽等终态错误不重试。
 
 `/user/quota` 的返回示例：
 

@@ -222,7 +222,23 @@ several deviations:
 | reasoning tokens | always 0 | read from `outputTokenDetails.reasoningTokens` |
 | Responses | separate process on 8788 | same port as the other two |
 
-`npm run verify` checks all three protocols item by item, 0 diffs each.
+Verification comes in two tiers:
+
+```powershell
+npm run verify:offline   # offline: mock upstream, 15 assertions, zero quota
+npm run verify           # live: against the real upstream, 3/3, small quota cost
+```
+
+Use the **offline** suite after code changes — it exercises the same translation
+layer against a local mock, so it needs no credentials, spends no plan quota, and
+finishes in seconds. The **live** suite is for confirming alignment with the
+official API.
+
+```powershell
+npm run mock             # start the mock upstream alone (default :8799)
+node tools/mock-upstream.mjs --scenario truncated   # force a truncated stream
+node tools/mock-upstream.mjs --scenario error       # force an upstream error
+```
 
 Two query endpoints sit alongside the protocols:
 
@@ -230,6 +246,12 @@ Two query endpoints sit alongside the protocols:
 |---|---|
 | `GET /user/balance` | the official `/user/balance` shape, remaining credit |
 | `GET /user/quota` | this project's shape, with 5-hour and weekly windows |
+
+For request forensics, add `--request-log <path>`; each request writes one JSON
+Lines record with protocol, model, stream, status, token counts and duration.
+Off by default. Upstream 429 and 5xx responses are retried with exponential
+backoff (twice by default, `--retries` to change); terminal errors such as an
+exhausted quota are not retried.
 
 `/user/quota` returns used, cap, percent and reset time per window, plus the
 monthly credit pool.

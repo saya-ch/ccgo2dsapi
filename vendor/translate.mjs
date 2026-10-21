@@ -10,6 +10,20 @@
 // OpenAI Chat Completions  →  wire
 // ══════════════════════════════════════════════════════════
 
+/** 从 data URL 或文件路径推断 MIME；无法判断时返回 undefined 让上游自己决定 */
+function inferImageMime(url) {
+  if (typeof url !== "string" || !url) return undefined;
+  const dataM = /^data:([^;]+);/.exec(url);
+  if (dataM) return dataM[1];
+  const ext = /\.([a-z0-9]+)(?:\?|#|$)/i.exec(url)?.[1]?.toLowerCase();
+  if (!ext) return undefined;
+  const map = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+    gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
+  };
+  return map[ext];
+}
+
 /** OpenAI 的 image_url（字符串或对象）→ data URL 或 http URL */
 function openAIImageUrl(input) {
   if (!input) return null;
@@ -70,8 +84,8 @@ export function openAIToWire(req) {
         else if (p.type === "image_url") {
           const url = openAIImageUrl(p.image_url);
           if (url) {
-            const mime = /^data:([^;]+);/.exec(url)?.[1] || "image/png";
-            parts.push({ type: "image", image: url, mimeType: mime });
+            const mime = inferImageMime(url);
+            parts.push({ type: "image", image: url, ...(mime ? { mimeType: mime } : {}) });
           }
         }
       }
@@ -180,12 +194,14 @@ export function anthropicToWire(req) {
     for (const p of toArray(m.content)) {
       if (p.type === "text") userParts.push({ type: "text", text: p.text });
       else if (p.type === "image") {
-        const mime = p.source?.media_type || "image/png";
-        userParts.push({
-          type: "image",
-          image: p.source?.data ? `data:${mime};base64,${p.source.data}` : (p.source?.url ?? ""),
-          mimeType: mime,
-        });
+        // 优先用客户端声明的 media_type；URL 图片从扩展名推断；
+        // 都拿不到就省略 mimeType，让上游自己判断 —— 不要假设 png。
+        const declared = p.source?.media_type;
+        const url = p.source?.data
+          ? `data:${declared || "image/png"};base64,${p.source.data}`
+          : (p.source?.url ?? "");
+        const mime = declared || inferImageMime(url);
+        userParts.push({ type: "image", image: url, ...(mime ? { mimeType: mime } : {}) });
       } else if (p.type === "tool_result") {
         toolParts.push({
           type: "tool-result",

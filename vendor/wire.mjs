@@ -391,3 +391,58 @@ export async function fetchWithTimeout(url, init = {}, timeoutMs = 600000) {
     init.signal?.removeEventListener?.("abort", onAbort);
   }
 }
+
+// ══════════════════════════════════════════════════════════
+// 直通事件解析（避免重复 JSON.parse）
+// ══════════════════════════════════════════════════════════
+// idle 超时：上游「发一半静默」时必须有兜底。
+// 从环境变量读，避免 wire.mjs 依赖命令行解析（那是 server.mjs 的职责）。
+const IDLE_TIMEOUT_MS = Number(process.env.CCGO_IDLE_TIMEOUT_MS || 180000);
+
+/**
+ * 逐行产出上游 NDJSON 事件。
+ *
+ * fetchWithTimeout 的超时只覆盖到响应头，headers 到达后就没有任何时限了。
+ * 上游「发一半静默」会让请求永久挂起，所以这里加 idle 超时：
+ * 超过 IDLE_TIMEOUT_MS 没有新数据就判定卡死并抛错。
+ */
+export async function* readNdjsonEvents(stream) {
+  const decoder = new TextDecoder();
+  let buf = "";
+  const iterator = stream[Symbol.asyncIterator]();
+  while (true) {
+    const nextPromise = iterator.next();
+    let timer;
+    const timeout = new Promise((_, rej) => {
+      timer = setTimeout(() => {
+        rej(Object.assign(new Error(`upstream idle for ${IDLE_TIMEOUT_MS}ms`), {
+          status: 504, retryable: true, midStream: true,
+        }));
+      }, IDLE_TIMEOUT_MS);
+      timer.unref?.();
+    });
+
+    let step;
+    try {
+      step = await Promise.race([nextPromise, timeout]);
+    } catch (e) {
+      try { await iterator.return?.(); } catch { }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (step.done) break;
+    const chunk = step.value;
+    buf += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const line2 = line.trim();
+      if (!line2) continue;
+      try { yield JSON.parse(line2); } catch { }
+    }
+  }
+  const tail = buf.trim();
+  if (tail) { try { yield JSON.parse(tail); } catch { } }
+}
