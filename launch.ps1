@@ -69,8 +69,8 @@ function Cfg([string]$path, $default) {
 if ($Port -le 0) { $Port = [int](Cfg "Port" 8787) }
 if (-not $HostAddress) { $HostAddress = [string](Cfg "HostAddress" "127.0.0.1") }
 
-$pkgName   = [string](Cfg "ProxyPackage" "commandcode-api-proxy")
-$distEntry = Join-Path $Root "node_modules\$pkgName\dist\proxy.js"
+# 自研网关：单进程提供 OpenAI / Anthropic / Responses 三套协议
+$distEntry = Join-Path $Root "vendor\server.mjs"
 
 $authRaw = [string](Cfg "AuthFile" "%USERPROFILE%\.commandcode\auth.json")
 $authFile = [Environment]::ExpandEnvironmentVariables($authRaw)
@@ -195,7 +195,7 @@ function Fail($msg, $hint) {
 
 # ══ 前置检查 ═══════════════════════════════════════════════
 if (-not (Test-Path $distEntry)) {
-  Fail "找不到代理入口：$distEntry" "请先在 $Root 执行：npm install"
+  Fail "找不到网关入口：$distEntry" "仓库不完整，请重新 clone"
 }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -244,15 +244,40 @@ if ($existingPid) {
   if (Get-ListenerPid $Port) { Fail "旧实例未释放端口 $Port" "请手动检查 PID $existingPid" }
 }
 
-# ══ 拉起代理（附着控制台 → 关窗口即停）═════════════════════
+# ══ 解析 CLI 版本 ══════════════════════════════════════════
+# 网关需要它构造 x-command-code-version 头，所以必须在启动前拿到。
+# 顺序：config 里写死的 > 已安装的 command-code 包 > npm registry > 兜底值。
+if (-not $cliVersion) {
+  try {
+    $ccPkg = Join-Path $env:APPDATA "npm\node_modules\command-code\package.json"
+    if (Test-Path $ccPkg) {
+      $cliVersion = [string](Get-Content $ccPkg -Raw | ConvertFrom-Json).version
+    }
+  } catch { }
+}
+if (-not $cliVersion -and $cliVersionReg) {
+  try {
+    $reg = Invoke-RestMethod $cliVersionReg -TimeoutSec 8
+    if ($reg.version) { $cliVersion = [string]$reg.version }
+  } catch { }
+}
+if (-not $cliVersion) { $cliVersion = "1.50.0" }
+
+# ══ 拉起网关（附着控制台 → 关窗口即停）═════════════════════
 $env:CC_API_KEY = $apiKey
 $env:PORT       = "$Port"
 $env:HOST       = $HostAddress
 $env:LOG_LEVEL  = [string](Cfg "LogLevel" "info")
 
 $errFile = Join-Path $LogDir "launcher.err.log"
-$proxy = Start-Process node -ArgumentList @("`"$distEntry`"") `
-  -WorkingDirectory $Root -NoNewWindow -PassThru `
+$proxy = Start-Process node -ArgumentList @(
+  "`"$distEntry`"",
+  "--port", "$Port",
+  "--host", "$HostAddress",
+  "--auth", "$authFile",
+  "--cli-version", "$cliVersion",
+  "--log-level", "$(Cfg "LogLevel" "info")"
+) -WorkingDirectory $Root -NoNewWindow -PassThru `
   -RedirectStandardOutput $LogFile -RedirectStandardError $errFile
 
 # P2-5: 记下 PID，否则 stop-proxy.ps1（README 卸载流程第一步）找不到进程
@@ -274,59 +299,7 @@ if (-not $ready) {
   exit 1
 }
 
-# ══ 拉起 Responses API 适配层 ══════════════════════════════
-# Responses 走独立端口，内部把请求转发到上面这个 Port，复用上游协议与鉴权。
-$responsesEnabled = [bool](Cfg "Responses.Enabled" $true)
-$responsesPort = [int](Cfg "Responses.Port" 8788)
-$responsesProc = $null
-
-if ($responsesEnabled -and $responsesPort -gt 0) {
-  $rsScript = Join-Path $Root "tools\responses-server.mjs"
-  if (Test-Path $rsScript) {
-    # 端口被旧实例占用就先清掉
-    $oldRs = Get-ListenerPid $responsesPort
-    if ($oldRs) {
-      $oldInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$oldRs" -ErrorAction SilentlyContinue
-      if ($oldInfo -and $oldInfo.CommandLine -match 'responses-server') {
-        Stop-Process -Id $oldRs -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
-      }
-    }
-    $rsOut = Join-Path $LogDir "responses.log"
-    $responsesProc = Start-Process node -ArgumentList @(
-      "`"$rsScript`"", "--port", "$responsesPort",
-      "--host", $HostAddress, "--upstream", "http://${HostAddress}:${Port}"
-    ) -WorkingDirectory $Root -NoNewWindow -PassThru `
-      -RedirectStandardOutput $rsOut -RedirectStandardError (Join-Path $LogDir "responses.err.log")
-
-    $rsReady = $false
-    for ($i = 0; $i -lt 40; $i++) {
-      Start-Sleep -Milliseconds 250
-      if ($responsesProc.HasExited) { break }
-      try {
-        $null = Invoke-RestMethod "http://${HostAddress}:${responsesPort}/health" -TimeoutSec 1
-        $rsReady = $true; break
-      } catch { }
-    }
-    if (-not $rsReady) {
-      if (-not $responsesProc.HasExited) { Stop-Process -Id $responsesProc.Id -Force -ErrorAction SilentlyContinue }
-      $responsesProc = $null
-      # P2-4: 之前只是少显示一行，用户以为 Responses 可用
-      $rsWarn = "Responses 适配层未启动（端口 $responsesPort），Responses 协议不可用。"
-      $rsWarnDetail = "查看日志：$rsOut；或改 config.json 的 Responses.Port"
-    }
-  }
-}
-
 # ══ 实时数据 ═══════════════════════════════════════════════
-# CLI 版本：优先 config，其次查 npm，最后回落到空（不带该头）
-if (-not $cliVersion -and $cliVersionReg) {
-  try {
-    $reg = Invoke-RestMethod $cliVersionReg -TimeoutSec 8
-    if ($reg.version) { $cliVersion = [string]$reg.version }
-  } catch { }
-}
-
 $ccHeaders = @{
   "Authorization" = "Bearer $apiKey"
   "Accept"        = "application/json"
@@ -463,11 +436,7 @@ function Render {
   AddRow "Connection" "Cyan"
   AddRow "OpenAI      http://${HostAddress}:${Port}/v1" "White"
   AddRow "Anthropic   http://${HostAddress}:${Port}" "White"
-  if ($responsesProc -and -not $responsesProc.HasExited) {
-    AddRow "Responses   http://${HostAddress}:${responsesPort}/v1" "White"
-  } elseif ($rsWarn) {
-    AddRow "Responses   (not running - see log)" "DarkRed"
-  }
+  AddRow "Responses   http://${HostAddress}:${Port}/v1" "White"
   AddRow "API Key     proxy-managed" "White"
   AddRow ("Upstream    " + $maskedKey) "DarkYellow"
   if (-not $ShowKey) { AddRow "            (-ShowKey to reveal)" "DarkGray" }
@@ -634,9 +603,6 @@ try {
     $pidPath = Join-Path $Root "proxy.pid"
     if (Test-Path $pidPath) { Remove-Item $pidPath -Force -ErrorAction SilentlyContinue }
   } catch { }
-  if ($responsesProc -and -not $responsesProc.HasExited) {
-    try { Stop-Process -Id $responsesProc.Id -Force -ErrorAction SilentlyContinue } catch { }
-  }
   if ($proxy -and -not $proxy.HasExited) {
     try { Stop-Process -Id $proxy.Id -Force -ErrorAction SilentlyContinue } catch { }
   }

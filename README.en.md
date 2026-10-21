@@ -63,7 +63,7 @@ This is not an official channel. Usage caps, model availability and stability ar
 Requires Windows 10/11, PowerShell 5.1+, Node.js 24+.
 
 ```powershell
-.\scripts\install.ps1      # install deps, generate config.json, apply protocol patches
+.\scripts\install.ps1      # check environment, generate config.json
 commandcode login          # log in to the CLI, creates auth.json
 .\launch.ps1               # start; the proxy lives as long as the window
 ```
@@ -86,7 +86,7 @@ npm run verify                # three-protocol parity verification
 |---|---|---|
 | OpenAI Chat Completions | `http://127.0.0.1:8787/v1` | [create-chat-completion](https://api-docs.deepseek.com/api/create-chat-completion) |
 | Anthropic Messages | `http://127.0.0.1:8787` | [anthropic_api](https://api-docs.deepseek.com/guides/anthropic_api) |
-| Responses | `http://127.0.0.1:8788/v1` | [responses_api](https://api-docs.deepseek.com/guides/responses_api) |
+| Responses | `http://127.0.0.1:8787/v1` | [responses_api](https://api-docs.deepseek.com/guides/responses_api) |
 
 Use `proxy-managed` as the API key — it is a sentinel the proxy swaps for the real key in `auth.json`. Any other value is forwarded upstream as your own key and comes back 401.
 
@@ -101,7 +101,7 @@ DeepSeek publishes setup guides for eight agents. This project does not restate 
 | Agent | Official guide | What to change locally |
 |---|---|---|
 | Claude Code | [claude_code](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code) | `ANTHROPIC_BASE_URL` → `http://127.0.0.1:8787` |
-| Codex | [codex](https://api-docs.deepseek.com/quick_start/agent_integrations/codex) | `base_url` → `http://127.0.0.1:8788/v1` |
+| Codex | [codex](https://api-docs.deepseek.com/quick_start/agent_integrations/codex) | `base_url` → `http://127.0.0.1:8787/v1` |
 | OpenCode | [opencode](https://api-docs.deepseek.com/quick_start/agent_integrations/opencode) | `baseURL` → `http://127.0.0.1:8787/v1` |
 | Hermes | [hermes](https://api-docs.deepseek.com/quick_start/agent_integrations/hermes) | Base URL → `http://127.0.0.1:8787/v1` |
 | OpenClaw | [openclaw](https://api-docs.deepseek.com/quick_start/agent_integrations/openclaw) | Base URL → `http://127.0.0.1:8787/v1` |
@@ -119,7 +119,7 @@ The API key is always `proxy-managed`.
 |---|---|---|
 | Claude Code | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8787` |
 | Claude Desktop | model mapping Base URL | `http://127.0.0.1:8787` |
-| Codex | `base_url` in the TOML | `http://127.0.0.1:8788/v1` |
+| Codex | `base_url` in the TOML | `http://127.0.0.1:8787/v1` |
 | OpenCode | `options.baseURL` | `http://127.0.0.1:8787/v1` |
 | OpenClaw | provider Base URL | `http://127.0.0.1:8787/v1` |
 | Hermes | `base_url` | `http://127.0.0.1:8787/v1` |
@@ -194,6 +194,36 @@ Four blocks: the three protocol endpoints, the model list (context + measured TP
 
 Data sources: the model list and context windows come from upstream `/provider/v1/models`; window caps and usage come from `/alpha/billing/credits` (caps are server-supplied, never hardcoded); plan names and monthly totals map from `planId`.
 
+## Implementation
+
+One process, one port, three protocols sharing a single upstream channel. The
+protocol layer is written here; there is no third-party dependency.
+
+```
+vendor/
+  wire.mjs       upstream protocol: headers, wire messages, NDJSON events
+  translate.mjs  OpenAI Chat / Anthropic Messages  <->  wire
+  responses.mjs  OpenAI Responses                  <->  wire
+  server.mjs     HTTP routing for all three
+```
+
+Field layouts come from static analysis of the official CLI's published
+artifact, recorded claim by claim in
+[docs/COMMAND-CODE-PROTOCOL.md](docs/COMMAND-CODE-PROTOCOL.md). Compared with
+the earlier implementation that sat on a third-party package, this closes
+several deviations:
+
+| Item | Earlier | Now |
+|---|---|---|
+| `User-Agent` | synthesised CLI string | the official value, `cli` |
+| image blocks | no `mimeType` | `mimeType` included |
+| `traceparent` | hand-rolled | standard W3C `00-<trace>-<span>-01` |
+| truncation | not detected | no `finish` and no `abort` -> retryable 502 |
+| reasoning tokens | always 0 | read from `outputTokenDetails.reasoningTokens` |
+| Responses | separate process on 8788 | same port as the other two |
+
+`npm run verify` checks all three protocols item by item, 0 diffs each.
+
 ## Configuration
 
 `config.json`, copied from `config.example.json` and already in `.gitignore`.
@@ -201,7 +231,6 @@ Data sources: the model list and context windows come from upstream `/provider/v
 | Field | Meaning |
 |---|---|
 | `Port` / `HostAddress` | Main proxy listener, defaults `8787` / loopback only |
-| `Responses.Enabled` / `Port` | Responses adapter, enabled by default on `8788` |
 | `AuthFile` | Credential path; environment variables supported |
 | `Upstream.*` | Upstream endpoints; change these to target a different service |
 | `Panel.ModelFilter` | Model filter regex, DeepSeek only by default |
@@ -212,7 +241,11 @@ Data sources: the model list and context windows come from upstream `/provider/v
 
 Listens on `127.0.0.1` only — do not change it to `0.0.0.0`. Do not share the key: upstream binds a device fingerprint to each key, and concurrent use from multiple machines is the most likely trigger for abuse controls. Credentials are read from the `auth.json` the CLI maintains; nothing is uploaded or cached.
 
-This project modifies files inside `node_modules` belonging to `commandcode-api-proxy` (MIT, by [thaolaptrinh](https://github.com/thaolaptrinh/commandcode-api-proxy)) in order to align protocol behaviour; modified files remain the original author's. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The upstream protocol layer is written in this repository (`vendor/`). There is no third-party
+Command Code package and no patch step. The protocol was derived from
+[static analysis of the official CLI](docs/COMMAND-CODE-PROTOCOL.md). Earlier versions depended on
+and were informed by `commandcode-api-proxy` (MIT, by [thaolaptrinh](https://github.com/thaolaptrinh/commandcode-api-proxy));
+attribution is retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 You accept the risk of account restrictions or plan termination.
 
@@ -225,7 +258,6 @@ You accept the risk of account restrictions or plan termination.
 | No reasoning content | Request omitted `reasoning_effort`, or set it to `none` |
 | 401 | API key is something other than `proxy-managed` |
 | 403 / model not recognized | Wrong model name, or not included in the plan |
-| Behaviour changed after `npm install` | Patches were overwritten; re-run `.\scripts\install.ps1` |
 | Port already in use | The launcher takes over its own stale instance; if another program owns it, pass `-Port` |
 
 ## Uninstall

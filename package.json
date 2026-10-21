@@ -6,18 +6,15 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "patch": "node tools/patch-reasoning.mjs && node tools/patch-parity.mjs && node tools/patch-anthropic.mjs && node tools/patch-alias.mjs",
-    "patch:check": "node tools/patch-reasoning.mjs --check && node tools/patch-parity.mjs --check && node tools/patch-anthropic.mjs --check && node tools/patch-alias.mjs --check",
-    "patch:restore": "node tools/patch-alias.mjs --restore && node tools/patch-anthropic.mjs --restore && node tools/patch-parity.mjs --restore && node tools/patch-reasoning.mjs --restore",
+    "patch": "echo 'no patches needed: the gateway is self-developed'",
+    "patch:check": "echo 'no patches needed'",
+    "patch:restore": "echo 'no patches needed'",
     "verify": "node tools/verify-all.mjs",
     "verify:openai": "node tools/verify-parity.mjs",
     "verify:anthropic": "node tools/verify-anthropic.mjs",
     "verify:responses": "node tools/verify-responses.mjs",
     "responses": "node tools/responses-server.mjs",
     "speed": "node tools/measure-speed.mjs --port 8787 --models deepseek/deepseek-v4-flash"
-  },
-  "dependencies": {
-    "commandcode-api-proxy": "^0.4.1"
   },
   "engines": {
     "node": ">=24"

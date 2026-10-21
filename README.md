@@ -63,7 +63,7 @@ Go 套餐本身只对官方 CLI 开放 `/alpha/generate`，不提供标准 API�
 需要 Windows 10/11、PowerShell 5.1+、Node.js 24+。
 
 ```powershell
-.\scripts\install.ps1      # 装依赖、生成 config.json、应用协议补丁
+.\scripts\install.ps1      # 检查环境、生成 config.json
 commandcode login          # 登录 CLI，生成 auth.json
 .\launch.ps1               # 启动；窗口开着就在跑，关窗即停
 ```
@@ -86,7 +86,7 @@ npm run verify                # 三套协议对齐验证
 |---|---|---|
 | OpenAI Chat Completions | `http://127.0.0.1:8787/v1` | [create-chat-completion](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion) |
 | Anthropic Messages | `http://127.0.0.1:8787` | [anthropic_api](https://api-docs.deepseek.com/zh-cn/guides/anthropic_api) |
-| Responses | `http://127.0.0.1:8788/v1` | [responses_api](https://api-docs.deepseek.com/zh-cn/guides/responses_api) |
+| Responses | `http://127.0.0.1:8787/v1` | [responses_api](https://api-docs.deepseek.com/zh-cn/guides/responses_api) |
 
 API Key 填 `proxy-managed`（哨兵值，代理替换成 `auth.json` 里的真实密钥）。填别的值会被当作你自己的密钥转发上游，返回 401。
 
@@ -102,7 +102,7 @@ API Key 填 `proxy-managed`（哨兵值，代理替换成 `auth.json` 里的真�
 | Agent | 官方接入文档 | 本地要改的 |
 |---|---|---|
 | Claude Code | [claude_code](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/claude_code) | `ANTHROPIC_BASE_URL` → `http://127.0.0.1:8787` |
-| Codex | [codex](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex) | `base_url` → `http://127.0.0.1:8788/v1` |
+| Codex | [codex](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex) | `base_url` → `http://127.0.0.1:8787/v1` |
 | OpenCode | [opencode](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/opencode) | `baseURL` → `http://127.0.0.1:8787/v1` |
 | Hermes | [hermes](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/hermes) | Base URL → `http://127.0.0.1:8787/v1` |
 | OpenClaw | [openclaw](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/openclaw) | Base URL → `http://127.0.0.1:8787/v1` |
@@ -121,7 +121,7 @@ DeepSeek 预设时可以直接指向本地。复制对应的 DeepSeek 预设，�
 |---|---|---|
 | Claude Code | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8787` |
 | Claude Desktop | 模型映射的 Base URL | `http://127.0.0.1:8787` |
-| Codex | TOML 的 `base_url` | `http://127.0.0.1:8788/v1` |
+| Codex | TOML 的 `base_url` | `http://127.0.0.1:8787/v1` |
 | OpenCode | `options.baseURL` | `http://127.0.0.1:8787/v1` |
 | OpenClaw | 供应商 Base URL | `http://127.0.0.1:8787/v1` |
 | Hermes | `base_url` | `http://127.0.0.1:8787/v1` |
@@ -199,6 +199,33 @@ PASS  Responses                差异 0
 
 数据来源：模型清单与上下文来自上游 `/provider/v1/models`，窗口上限与已用量来自 `/alpha/billing/credits`（上限由服务端下发，不写死），套餐名与月总额按 `planId` 映射。
 
+## 实现
+
+单进程、单端口，三套协议共用一条上游通道。协议层自研，无第三方依赖。
+
+```
+vendor/
+  wire.mjs       upstream protocol: headers, wire messages, NDJSON events
+  translate.mjs  OpenAI Chat / Anthropic Messages  <->  wire
+  responses.mjs  OpenAI Responses                  <->  wire
+  server.mjs     HTTP routing for all three
+```
+
+字段布局来自对官方 CLI 发布产物的静态分析，逐条记录在
+[docs/COMMAND-CODE-PROTOCOL.md](docs/COMMAND-CODE-PROTOCOL.md)。与早期依赖第三方包
+的实现相比，自研版对齐了几处此前偏离的细节：
+
+| 项 | 早期实现 | 现在 |
+|---|---|---|
+| `User-Agent` | 仿造的 CLI 字符串 | 官方值 `cli` |
+| 图片块 | 无 `mimeType` | 带 `mimeType` |
+| `traceparent` | 自造格式 | 标准 W3C `00-<trace>-<span>-01` |
+| 截断检测 | 无 | 无 `finish` 且无 `abort` → 可重试 502 |
+| 推理 token | 恒为 0 | 从 `outputTokenDetails.reasoningTokens` 提取 |
+| Responses 端口 | 独立 8788 进程 | 与另两套同端口 |
+
+`npm run verify` 对三套协议逐项对齐验证，全部 0 处差异。
+
 ## 配置
 
 `config.json`（由 `config.example.json` 复制，已加入 `.gitignore`）。
@@ -206,7 +233,6 @@ PASS  Responses                差异 0
 | 字段 | 说明 |
 |---|---|
 | `Port` / `HostAddress` | 主代理监听，默认 `8787` / 仅回环 |
-| `Responses.Enabled` / `Port` | Responses 适配层，默认开启、`8788` |
 | `AuthFile` | 凭据路径，支持环境变量 |
 | `Upstream.*` | 上游接口，换服务时改这里 |
 | `Panel.ModelFilter` | 模型过滤正则，默认只匹配 DeepSeek |
@@ -217,7 +243,10 @@ PASS  Responses                差异 0
 
 默认只监听 `127.0.0.1`，不要改成 `0.0.0.0`。不要共享密钥——上游按密钥绑定设备指纹，多机并发最容易触发风控。凭据只从 CLI 维护的 `auth.json` 读取，不上传、不缓存。
 
-本项目修改了 `commandcode-api-proxy`（MIT，作者 [thaolaptrinh](https://github.com/thaolaptrinh/commandcode-api-proxy)）在 `node_modules` 内的文件以对齐协议行为，被改文件仍属原作者。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+上游协议层是本项目自研的（`vendor/`），不依赖任何第三方 Command Code 包，也没有需要重打的补丁。协议依据来自
+[官方 CLI 的静态分析](docs/COMMAND-CODE-PROTOCOL.md)。早期版本曾依赖并被 `commandcode-api-proxy`（MIT，
+作者 [thaolaptrinh](https://github.com/thaolaptrinh/commandcode-api-proxy)）启发，署名保留在
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 使用者需自行承担账号受限、套餐终止等后果。
 
@@ -230,7 +259,6 @@ PASS  Responses                差异 0
 | 看不到思考内容 | 请求未带 `reasoning_effort`，或值为 `none` |
 | 401 | API Key 填了非 `proxy-managed` 的值 |
 | 403 / model not recognized | 模型名不对或不在套餐内 |
-| `npm install` 后行为变化 | 补丁被覆盖，重跑 `.\scripts\install.ps1` |
 | 端口被占用 | 启动器会自动接管本项目的旧实例；若占用者是别的程序，用 `-Port` 换端口 |
 
 ## 卸载

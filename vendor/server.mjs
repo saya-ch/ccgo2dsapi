@@ -729,7 +729,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === "GET" && (url === "/health" || url === "/v1/health")) {
-      return sendJson(res, 200, { status: "ok", version: "vendor-1", endpoints: ["/v1/chat/completions", "/v1/messages", "/v1/models"] });
+      return sendJson(res, 200, { status: "ok", version: "1.0.0", endpoints: ["/v1/chat/completions", "/v1/messages", "/v1/models"] });
     }
     if (req.method === "GET" && url === "/v1/models") return handleModels(res);
     if (req.method === "GET" && (url === "/user/balance" || url === "/v1/user/balance")) return await handleBalance(res);

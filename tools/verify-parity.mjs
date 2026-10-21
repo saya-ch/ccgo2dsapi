@@ -138,7 +138,14 @@ console.log("\n=== 7. 流式（官方：data: {...}\\n\\n，末尾 data: [DONE]�
 // ── 8. 思考模式默认行为 ─────────────────────────────────────
 console.log("\n=== 8. 默认是否思考（官方 Flash 默认开思考）===");
 {
-  const r = await postR({ model: MODEL, messages: [{ role: "user", content: "简单问题：1+1" }], max_tokens: 200 });
+  // 用需要推理的问题：对 "1+1" 这类简单题，模型往往直接作答、不产生思考，
+  // 那属于模型行为而非协议差异。这里换成会触发推理的提问，才能真正验证
+  // 「默认开启思考」这条契约。
+  const r = await postR({
+    model: MODEL,
+    messages: [{ role: "user", content: "计算 17*23，并解释每一步推理过程。" }],
+    max_tokens: 1500,
+  });
   const rt = r.parsed?.usage?.completion_tokens_details?.reasoning_tokens;
   const hasRC = !!r.parsed?.choices?.[0]?.message?.reasoning_content;
   show("默认产生 reasoning", (rt ?? 0) > 0, `reasoning_tokens=${rt}`, "官方默认开启思考模式");

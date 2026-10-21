@@ -2,10 +2,11 @@
 <#
   ccgo2dsapi / 一键安装
 
-  做三件事：
-    1. 检查 Node.js
+  做两件事：
+    1. 检查 Node.js（>= 24）
     2. 生成 config.json（若不存在，从 config.example.json 复制）
-    3. npm install 拉取上游代理包
+  本项目不依赖任何第三方 Command Code 包：协议层在 vendor/ 下自研，
+  因此无需 npm install，也没有需要重打的补丁。
   不会碰你的凭据 —— 凭据由 CLI 自己管理。
 
   用法：
@@ -23,7 +24,7 @@ Write-Host ("  target: " + $root) -ForegroundColor DarkGray
 Write-Host ""
 
 # 1. Node
-Write-Host "[1/4] checking node ..." -ForegroundColor Cyan
+Write-Host "[1/3] checking node ..." -ForegroundColor Cyan
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
   Write-Host "  x node not found. install Node.js >= 24 first." -ForegroundColor Red
@@ -42,7 +43,7 @@ if ($major -lt 24) {
 Write-Host ("  ok   node " + $nodeVer) -ForegroundColor Green
 
 # 2. config
-Write-Host "[2/4] config.json ..." -ForegroundColor Cyan
+Write-Host "[2/3] config.json ..." -ForegroundColor Cyan
 $cfg = Join-Path $root "config.json"
 $example = Join-Path $root "config.example.json"
 if (Test-Path $cfg) {
@@ -56,65 +57,29 @@ if (Test-Path $cfg) {
 }
 
 # 3. npm
-Write-Host "[3/4] npm install ..." -ForegroundColor Cyan
-if ($SkipNpm) {
-  Write-Host "  skipped (-SkipNpm)" -ForegroundColor Yellow
-} else {
-  Push-Location $root
-  try {
-    & npm install --no-fund --no-audit
-    if ($LASTEXITCODE -ne 0) {
-      Write-Host "  x npm install failed (exit $LASTEXITCODE)" -ForegroundColor Red
-      Pop-Location
-      exit 1
-    }
-  } finally {
-    Pop-Location
-  }
-  Write-Host "  ok   dependencies installed" -ForegroundColor Green
+Write-Host "[3/3] gateway self-check ..." -ForegroundColor Cyan
+$gwFiles = @("vendor\wire.mjs", "vendor\translate.mjs", "vendor\responses.mjs", "vendor\server.mjs")
+$missing = @()
+foreach ($f in $gwFiles) {
+  if (-not (Test-Path (Join-Path $root $f))) { $missing += $f }
 }
-
-# 4. 推理默认值补丁
-# 上游只有收到 reasoning_effort 才会产生推理内容，不打这个补丁就看不到 CoT。
-# 补丁改的是 node_modules 里的文件，npm install 会覆盖，所以每次装完都要跑。
-Write-Host "[4/4] reasoning default patch ..." -ForegroundColor Cyan
-if ($SkipNpm) {
-  Write-Host "  skipped (-SkipNpm)" -ForegroundColor Yellow
-} else {
-  Push-Location $root
-  try {
-    # 必须先跑 reasoning 补丁（改 openai.js），再跑 parity 补丁（改 server.js）
-    $patchFailed = @()
-    foreach ($ps in @("tools\patch-reasoning.mjs", "tools\patch-parity.mjs", "tools\patch-anthropic.mjs", "tools\patch-alias.mjs")) {
-      $patchScript = Join-Path $root $ps
-      if (-not (Test-Path $patchScript)) {
-        Write-Host "  ! $ps not found, skipped" -ForegroundColor Yellow
-        $patchFailed += $ps
-        continue
-      }
-      & node $patchScript
-      if ($LASTEXITCODE -ne 0) {
-        Write-Host "  ! $ps failed (exit $LASTEXITCODE)" -ForegroundColor Red
-        $patchFailed += $ps
-      }
-    }
-    if ($patchFailed.Count -gt 0) {
-      Write-Host ""
-      Write-Host "  x 有 $($patchFailed.Count) 个补丁未完整应用：" -ForegroundColor Red
-      foreach ($pf in $patchFailed) { Write-Host "      $pf" -ForegroundColor Red }
-      Write-Host "    回复仍可用，但协议行为可能与官方不一致。" -ForegroundColor Yellow
-      Write-Host "    多半是上游 commandcode-api-proxy 版本变化导致锚点失配。" -ForegroundColor Yellow
-      throw "patches incomplete"
-    }
-  } finally {
-    Pop-Location
-  }
+if ($missing.Count -gt 0) {
+  Write-Host "  x 缺少网关文件：" -ForegroundColor Red
+  foreach ($m in $missing) { Write-Host "      $m" -ForegroundColor Red }
+  throw "gateway incomplete"
 }
+$syntaxOk = $true
+foreach ($f in $gwFiles) {
+  & node --check (Join-Path $root $f) 2>$null
+  if ($LASTEXITCODE -ne 0) { $syntaxOk = $false; Write-Host "  x 语法错误：$f" -ForegroundColor Red }
+}
+if (-not $syntaxOk) { throw "gateway syntax error" }
+Write-Host "  ok   vendor/ 网关就绪（wire + translate + responses + server）" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "  next steps:" -ForegroundColor Cyan
 Write-Host "    1. log in with the vendor CLI so auth.json exists" -ForegroundColor Gray
-Write-Host "    2. .\launch.ps1          (starts proxy + panel)" -ForegroundColor Gray
+Write-Host "    2. .\launch.ps1          (starts gateway + panel)" -ForegroundColor Gray
 Write-Host "    3. .\scripts\test-proxy.ps1   (optional self-check)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  optional: create a desktop shortcut ->  .\scripts\make-shortcut.ps1" -ForegroundColor DarkGray
