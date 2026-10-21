@@ -1,4 +1,4 @@
-#requires -Version 5
+﻿#requires -Version 5
 <#
   ccgo2dsapi / 创建桌面快捷方式
 

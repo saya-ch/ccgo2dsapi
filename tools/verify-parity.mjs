@@ -146,3 +146,4 @@ console.log("\n=== 8. 默认是否思考（官方 Flash 默认开思考）===");
 }
 
 console.log(`\n──────── 共 ${diffs} 处差异 ────────`);
+process.exit(diffs > 0 ? 1 : 0);

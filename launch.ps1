@@ -1,4 +1,4 @@
-#requires -Version 5
+﻿#requires -Version 5
 <#
   ccgo2dsapi —— 本地反代启动器 + 额度面板
   ────────────────────────────────────────

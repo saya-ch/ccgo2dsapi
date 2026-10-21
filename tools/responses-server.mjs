@@ -13,11 +13,9 @@ import http from "node:http";
 import {
   toCCMessagesFromInput,
   toCCToolsFromResponses,
-  resolveToolChoice,
   resolveEffort,
-  nextSeq,
-  resetSeq,
   newResponseId,
+  createSeq,
   newItemId,
   toResponsesUsage,
 } from "./responses.js";
@@ -76,7 +74,8 @@ function toChatRequest(body) {
   const out = {
     model: body.model,
     messages,
-    max_tokens: body.max_output_tokens ?? 4096,
+    // 官方不传 max_output_tokens 时由服务端决定；这里不要硬编码，否则长输出被静默截断
+    ...(body.max_output_tokens ? { max_tokens: body.max_output_tokens } : {}),
     stream: body.stream === true,
   };
 
@@ -90,8 +89,17 @@ function toChatRequest(body) {
       function: { name: t.name, description: t.description, parameters: t.input_schema },
     }));
   }
-  const tc = resolveToolChoice(body.tool_choice);
-  if (tc) out.tool_choice = tc.type === "tool" ? { type: "function", function: { name: tc.name } } : "auto";
+  // 8787 要的是 OpenAI chat 形状的 tool_choice（裸字符串或 function 对象），
+  // 它自己再转成 CC 的 {type:"auto"|"any"|"tool"}。不能用 responses.js 的
+  // resolveToolChoice —— 那个返回 CC 形状，会与 8787 的期望错位。
+  const tc = body.tool_choice;
+  if (tc === "required") {
+    out.tool_choice = "required";          // 强制调用，不能降级成 auto
+  } else if (tc && typeof tc === "object") {
+    const name = tc.name ?? tc.function?.name;
+    if (name) out.tool_choice = { type: "function", function: { name } };
+  }
+  // auto / none / 缺省：不传，交给上游默认
 
   const effort = resolveEffort(body.reasoning);
   if (effort) out.reasoning_effort = effort;
@@ -221,7 +229,7 @@ async function handleStream(body, res) {
   chatReq.stream_options = { include_usage: true };
 
   const respId = newResponseId();
-  resetSeq();
+  const nextSeq = createSeq();
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",

@@ -21,13 +21,15 @@ function textFromContent(content) {
 
 function imageParts(content) {
   if (!Array.isArray(content)) return [];
+  // 8787 只认 OpenAI 形状 {type:"image_url", image_url:{url}}；
+  // 若输出 {type:"image"} 会被上游静默降级成空文本，图片内容直接丢失。
   return content
     .filter((p) => p && p.type === "input_image")
     .map((p) => {
       const url = p.image_url ?? p.file_id ?? "";
-      return { type: "image", image: url };
+      return { type: "image_url", image_url: { url } };
     })
-    .filter((p) => p.image);
+    .filter((p) => p.image_url?.url);
 }
 
 export function toCCMessagesFromInput(input, instructions) {
@@ -167,24 +169,25 @@ export function resolveEffort(reasoning) {
   const e = reasoning.effort;
   if (typeof e !== "string" || e.length === 0) return undefined;
   const k = e.toLowerCase();
-  // 官方 effort 映射：minimal→low, low→low, medium→high, high→high, xhigh→high, max/ultra→max
+  // 只做「官方档位 → 上游档位」的语义别名归一，不跨档位搬移。
+  // medium/xhigh 必须原样透传：上游 resolveEffortForModel 会按 DeepSeek
+  // 支持集 {low,high,max} 统一裁剪；若在这里预先映射，同一输入在
+  // Responses 与 Chat/Anthropic 两条路径上会得到不同推理强度。
   const MAP = {
     none: "off",
     minimal: "low",
-    low: "low",
-    medium: "high",
-    high: "high",
-    xhigh: "high",
-    max: "max",
     ultra: "max",
   };
   return MAP[k] ?? k;
 }
 
 // ── 响应构造 ──────────────────────────────────────────────
-let seqCounter = 0;
-export function resetSeq() { seqCounter = 0; }
-export function nextSeq() { return seqCounter++; }
+// sequence_number 必须是请求局部的：模块级计数器在两个并发流之间
+// 会互相 reset，导致序号回退，严格校验的客户端会报错。
+export function createSeq() {
+  let n = 0;
+  return () => n++;
+}
 
 export function newResponseId() {
   const rnd = Math.random().toString(36).slice(2).padEnd(20, "0");

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F172A" alt="MIT"></a>
   <a href="#configuration"><img src="https://img.shields.io/badge/Windows-10%2B%2011-0078D4?logo=windows&logoColor=white" alt="Windows 10/11"></a>
-  <a href="#configuration"><img src="https://img.shields.io/badge/Node.js-18%2B-339933?logo=nodejs&logoColor=white" alt="Node.js 18+"></a>
+  <a href="#configuration"><img src="https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodejs&logoColor=white" alt="Node.js 24+"></a>
   <a href="#configuration"><img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+"></a>
 </p>
 
@@ -53,7 +53,7 @@ This is not an official channel. Usage caps, model availability and stability ar
 
 ## Quick start
 
-Requires Windows 10/11, PowerShell 5.1+, Node.js 18+.
+Requires Windows 10/11, PowerShell 5.1+, Node.js 24+.
 
 ```powershell
 .\scripts\install.ps1      # install deps, generate config.json, apply protocol patches

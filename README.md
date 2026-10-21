@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F172A" alt="MIT"></a>
   <a href="#配置"><img src="https://img.shields.io/badge/Windows-10%2B%2011-0078D4?logo=windows&logoColor=white" alt="Windows 10/11"></a>
-  <a href="#配置"><img src="https://img.shields.io/badge/Node.js-18%2B-339933?logo=nodejs&logoColor=white" alt="Node.js 18+"></a>
+  <a href="#配置"><img src="https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodejs&logoColor=white" alt="Node.js 24+"></a>
   <a href="#配置"><img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+"></a>
 </p>
 
@@ -53,7 +53,7 @@ Go 套餐本身只对官方 CLI 开放 `/alpha/generate`，不提供标准 API�
 
 ## 快速开始
 
-需要 Windows 10/11、PowerShell 5.1+、Node.js 18+。
+需要 Windows 10/11、PowerShell 5.1+、Node.js 24+。
 
 ```powershell
 .\scripts\install.ps1      # 装依赖、生成 config.json、应用协议补丁

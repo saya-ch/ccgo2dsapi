@@ -258,3 +258,9 @@ function ccgoResolveEffort(req) {
 
 console.log(`\n完成 ${changed}/4 步。重启反代生效：`);
 console.log("  .\\scripts\\stop-proxy.ps1 ; .\\scripts\\start-proxy.ps1 -Hidden");
+
+// 锚点失配意味着补丁没打全，不能让安装脚本以为成功
+if (changed < 4) {
+  console.error(`\nx 只应用了 ${changed}/4 步 —— 上游 dist 可能已变更，请检查锚点`);
+  process.exit(1);
+}

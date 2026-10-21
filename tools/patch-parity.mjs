@@ -65,7 +65,10 @@ if (hasFlag("--check")) {
 
 if (hasFlag("--restore")) {
   let n = 0;
-  for (const f of [serverFile, modelsFile]) {
+  // openai.js 也在本补丁的改动范围内（none→off 映射）。
+  // 之前漏了它，单独跑 patch:restore 会留下半打补丁的状态。
+  const openaiFileForRestore = path.join(dist, "translate", "openai.js");
+  for (const f of [serverFile, modelsFile, openaiFileForRestore]) {
     const bak = f + ".parity-orig";
     if (fs.existsSync(bak)) { fs.copyFileSync(bak, f); fs.unlinkSync(bak); n++; }
   }
@@ -172,17 +175,22 @@ function ccgoMapEffort(v) {
 }
 
 `;
-    oaSrc = oaSrc.replace(fnAnchor, helper + fnAnchor);
-    // 包住 reasoning_effort 的计算
+    // 先验证目标行还在，再决定是否插入 helper。
+    // 顺序是 patch-reasoning → patch-parity，前一步往往已经改写了
+    // reasoning_effort 那一行；若此处仍无条件插入 helper，失配时不写盘，
+    // 但后面 usage 补丁会把含 helper 的内存内容落盘，留下一个没有调用点的
+    // 死函数（ccgoMapEffort）。所以必须先匹配、后插入。
     const re = /reasoning_effort:\s*resolveEffortForModel\(resolvedModel,\s*([^)]+)\),/;
     const m = oaSrc.match(re);
     if (m) {
+      oaSrc = oaSrc.replace(fnAnchor, helper + fnAnchor);
       oaSrc = oaSrc.replace(re, `reasoning_effort: resolveEffortForModel(resolvedModel, ccgoMapEffort(${m[1].trim()})),`);
       fs.writeFileSync(openaiFile + ".parity-orig", fs.readFileSync(openaiFile), "utf8");
       fs.writeFileSync(openaiFile, oaSrc, "utf8");
       console.log('已改 reasoning_effort：官方 "none" 自动映射为上游 "off"');
     } else {
-      console.warn("找不到 reasoning_effort 赋值行，跳过 none 映射");
+      // 保持 oaSrc 原样，避免后续写盘时带上未使用的 helper
+      console.warn("找不到 reasoning_effort 赋值行，跳过 none 映射（不插入 helper）");
     }
   }
 } else if (oaSrc.includes(EFFORT_MARKER)) {

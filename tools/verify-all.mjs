@@ -74,7 +74,10 @@ for (const s of suites) {
   const { code, out } = await run(s.script, s.port);
   const m = out.match(/共\s*(\d+)\s*处差异/);
   const diffs = m ? Number(m[1]) : null;
-  results.push({ ...s, status: code === 0 ? "pass" : "fail", diffs });
+  // 双重判定：退出码为 0 且解析出的差异数为 0 才算通过。
+  // 只看退出码会漏掉那些打印了差异却不设置退出码的脚本。
+  const passed = code === 0 && diffs === 0;
+  results.push({ ...s, status: passed ? "pass" : "fail", diffs });
 }
 
 // ── 汇总 ──────────────────────────────────────────────────
