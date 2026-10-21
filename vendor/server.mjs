@@ -41,6 +41,24 @@ const API_BASE = argOf("--base", "https://api.commandcode.ai");
 const AUTH_FILE = argOf("--auth", path.join(os.homedir(), ".commandcode", "auth.json"));
 const CLI_VERSION = argOf("--cli-version", "1.50.0");
 const API_KEY_SENTINEL = argOf("--sentinel", "proxy-managed");
+
+/**
+ * 解析调用方提供的凭据。
+ *
+ * - 没传 / 传空 / 传 sentinel → 用 auth.json 里的密钥（本项目自己的额度）
+ * - 传了其它值 → 当作调用方自己的上游密钥原样转发，上游鉴权失败会返回 401
+ *
+ * 这样 README 里「填别的值会被当作你自己的密钥转发上游」才是真的；
+ * 之前那段代码声明了 sentinel 却从未校验，任何字符串都能白用本项目额度。
+ */
+function resolveApiKey(req) {
+  const auth = req.headers["authorization"] || "";
+  const xKey = req.headers["x-api-key"] || "";
+  const given = (auth.startsWith("Bearer ") ? auth.slice(7) : auth) || xKey || "";
+
+  if (!given || given === API_KEY_SENTINEL) return readApiKey();
+  return given;
+}
 const MAX_BODY = 48 * 1024 * 1024;
 const TIMEOUT_MS = Number(argOf("--timeout", "600000"));
 const ALLOW_CORS = args.includes("--cors");
@@ -79,7 +97,8 @@ function logError(...a) {
 // ── 鉴权：从 auth.json 读真实 key ─────────────────────────
 let cachedKey = null;
 function readApiKey() {
-  if (cachedKey && process.env.CCGO_NO_CACHE) return cachedKey;
+  // 缓存是默认行为；CCGO_NO_CACHE 用来强制重新读盘（密钥轮换后无需重启）。
+  if (cachedKey && !process.env.CCGO_NO_CACHE) return cachedKey;
   try {
     const j = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
     const k = j.apiKey || j.api_key || j.key || j.token;
@@ -106,8 +125,8 @@ function makeConfig() {
   };
 }
 
-async function callUpstream({ model, messages, system, tools, maxTokens, temperature, effort, signal }) {
-  const apiKey = readApiKey();
+async function callUpstream({ model, messages, system, tools, maxTokens, temperature, effort, signal, apiKey: explicitKey }) {
+  const apiKey = explicitKey || readApiKey();
   const { traceId, spanId } = generateTraceIds();
   const sessionId = generateSessionId();
 
@@ -158,6 +177,20 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
   return res;
 }
 
+/**
+ * 为一次流式响应建立中止通道：客户端断开时取消上游请求，
+ * 避免连接已死还继续读上游、白耗配额。
+ */
+function makeAbortChannel(res) {
+  const ac = new AbortController();
+  const onClose = () => ac.abort();
+  res.on("close", onClose);
+  return {
+    signal: ac.signal,
+    cleanup: () => res.off("close", onClose),
+  };
+}
+
 // ── HTTP 工具 ─────────────────────────────────────────────
 /**
  * 安全写入：客户端可能已经断开（流式响应尤其常见），
@@ -200,24 +233,43 @@ function sendSseHeaders(res) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let settled = false;
     const chunks = [];
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
     req.on("data", (c) => {
+      if (settled) return;
       size += c.length;
       if (size > MAX_BODY) {
-        req.destroy();
-        reject(Object.assign(new Error("body too large"), { status: 413 }));
+        // 先停读并让调用方回 413，再销毁连接。
+        // 直接 req.destroy() 会把 socket 一起杀掉，413 就发不出去了。
+        req.pause();
+        fail(Object.assign(new Error("body too large"), { status: 413 }));
         return;
       }
       chunks.push(c);
     });
+
     req.on("end", () => {
+      if (settled) return;
+      settled = true;
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
-      } catch (e) {
+      } catch {
         reject(Object.assign(new Error("invalid json"), { status: 400 }));
       }
     });
-    req.on("error", reject);
+
+    // 客户端上传到一半断开时只发 close，不发 error/end。
+    // 不监听 close 的话这个 Promise 永远不会 settle，handler 闭包连同
+    // 已缓冲的 chunks 一起泄漏。
+    req.on("error", fail);
+    req.on("close", () => fail(Object.assign(new Error("client aborted"), { status: 499 })));
   });
 }
 
@@ -243,8 +295,15 @@ const MODEL_ALIASES = {
 };
 
 function resolveModel(m) {
-  if (!m) return "deepseek/deepseek-v4.1-flash";
-  if (m.includes("/")) return m;
+  if (!m || typeof m !== "string") return "deepseek/deepseek-v4.1-flash";
+
+  // Claude Code 用 model[1M] 声明上下文窗口，这是它自己的语法，
+  // 不能原样发给上游。剥掉后再解析。
+  const cleaned = m.replace(/\[(?:1m|1M)\]$/i, "").trim();
+  if (!cleaned) return "deepseek/deepseek-v4.1-flash";
+
+  if (cleaned.includes("/")) return cleaned;
+  m = cleaned;
   const k = m.toLowerCase();
   if (MODEL_ALIASES[k]) return MODEL_ALIASES[k];
   // Anthropic 官方语义：claude-opus* -> pro，sonnet/haiku/fable/其它 claude* -> flash
@@ -274,16 +333,27 @@ async function handleOpenAI(req, res) {
   const model = resolveModel(body.model);
   const stream = body.stream === true;
 
-  const upstream = await callUpstream({
-    model,
-    messages: t.messages,
-    system: t.system,
-    tools: t.tools.length ? t.tools : undefined,
-    maxTokens: t.maxTokens,
-    temperature: t.temperature,
-    // 官方 DeepSeek 默认开启思考模式；未显式指定时给 high
-    effort: t.effort === undefined ? "high" : t.effort,
-  });
+  // A4: 客户端断开时取消上游请求。只对流式生效 —— 非流式没有长连接可断。
+  const abortCh = stream ? makeAbortChannel(res) : null;
+
+  let upstream;
+  try {
+    upstream = await callUpstream({
+      model,
+      messages: t.messages,
+      system: t.system,
+      tools: t.tools.length ? t.tools : undefined,
+      maxTokens: t.maxTokens,
+      temperature: t.temperature,
+      // 官方 DeepSeek 默认开启思考模式；未显式指定时给 high
+      effort: t.effort === undefined ? "high" : t.effort,
+      signal: abortCh?.signal,
+      apiKey: resolveApiKey(req),
+    });
+  } catch (e) {
+    abortCh?.cleanup();
+    throw e;
+  }
 
   const id = "chatcmpl-" + Math.random().toString(36).slice(2, 14);
   const created = Math.floor(Date.now() / 1000);
@@ -312,9 +382,15 @@ async function handleOpenAI(req, res) {
 
   let sawToolUse = false;
   let toolIndex = 0;
+  let sawFinish = false;
+  let sawAbort = false;
+  let failed = false;
 
   try {
     for await (const ev of readEvents(upstream.body)) {
+      // A4: 客户端断开后停止消费，不再向上游要数据
+      if (res.writableEnded || res.destroyed) break;
+      if (ev.type === "abort") { sawAbort = true; continue; }
       if (ev.type === "text-delta" && ev.text) {
         emit(chunk({ content: ev.text }));
       } else if (ev.type === "reasoning-delta" && ev.text) {
@@ -341,6 +417,7 @@ async function handleOpenAI(req, res) {
           }));
         }
       } else if (ev.type === "finish") {
+        sawFinish = true;
         const u = ev.totalUsage;
         const usage = wireToOpenAIUsage({
           inputTokens: u?.inputTokens, outputTokens: u?.outputTokens,
@@ -354,14 +431,39 @@ async function handleOpenAI(req, res) {
           emit({ id, object: "chat.completion.chunk", created, model, choices: [], usage });
         }
       } else if (ev.type === "error") {
+        // A2: 错误后必须立刻停止，且不能再发 [DONE] —— 那等于把失败说成成功
+        failed = true;
         const e = typeof ev.error === "string" ? ev.error : ev.error?.message;
-        emit(openAIError(e || "stream error", "upstream_error"));
+        emit({
+          ...openAIError(e || "stream error", "upstream_error"),
+          id, object: "chat.completion.chunk", created, model, choices: [],
+        });
+        break;
       }
     }
   } catch (e) {
-    emit(openAIError(e.message, "upstream_error"));
+    // A1: 流在收到 finish 之前结束 = 上游截断，不能当成功
+    failed = true;
+    emit({
+      ...openAIError(
+        sawFinish || sawAbort ? e.message : "upstream stream truncated before completion",
+        "upstream_error"
+      ),
+      id, object: "chat.completion.chunk", created, model, choices: [],
+    });
   }
-  safeWrite(res, "data: [DONE]\n\n");
+
+  // A1: 既没 finish 也没 abort，说明流被截断
+  if (!failed && !sawFinish && !sawAbort) {
+    emit({
+      ...openAIError("upstream stream truncated before completion", "upstream_error"),
+      id, object: "chat.completion.chunk", created, model, choices: [],
+    });
+    safeEnd(res);
+    return;
+  }
+
+  if (!failed) safeWrite(res, "data: [DONE]\n\n");
   safeEnd(res);
 }
 
@@ -374,15 +476,25 @@ async function handleAnthropic(req, res) {
   const model = resolveModel(body.model);
   const stream = body.stream === true;
 
-  const upstream = await callUpstream({
-    model,
-    messages: t.messages,
-    system: t.system,
-    tools: t.tools.length ? t.tools : undefined,
-    maxTokens: t.maxTokens,
-    temperature: t.temperature,
-    effort: t.effort,
-  });
+  const abortCh = stream ? makeAbortChannel(res) : null;
+
+  let upstream;
+  try {
+    upstream = await callUpstream({
+      model,
+      messages: t.messages,
+      system: t.system,
+      tools: t.tools.length ? t.tools : undefined,
+      maxTokens: t.maxTokens,
+      temperature: t.temperature,
+      effort: t.effort,
+      signal: abortCh?.signal,
+      apiKey: resolveApiKey(req),
+    });
+  } catch (e) {
+    abortCh?.cleanup();
+    throw e;
+  }
 
   const id = "msg_" + Math.random().toString(36).slice(2, 20);
 
@@ -416,6 +528,9 @@ async function handleAnthropic(req, res) {
   let blockIndex = -1;
   let openBlock = null; // "text" | "thinking" | "tool_use"
   let sawToolUse = false;
+  let sawFinish = false;
+  let sawAbort = false;
+  let failed = false;
 
   const closeBlock = () => {
     if (openBlock !== null) {
@@ -432,6 +547,9 @@ async function handleAnthropic(req, res) {
 
   try {
     for await (const ev of readEvents(upstream.body)) {
+      // A4: 客户端断开就停止消费
+      if (res.writableEnded || res.destroyed) break;
+      if (ev.type === "abort") { sawAbort = true; continue; }
       if (ev.type === "reasoning-delta" && ev.text) {
         if (openBlock !== "thinking") openNew("thinking", { type: "thinking", thinking: "" });
         emit("content_block_delta", { index: blockIndex, delta: { type: "thinking_delta", thinking: ev.text } });
@@ -452,6 +570,7 @@ async function handleAnthropic(req, res) {
         });
         closeBlock();
       } else if (ev.type === "finish") {
+        sawFinish = true;
         closeBlock();
         const u = ev.totalUsage;
         emit("message_delta", {
@@ -465,15 +584,31 @@ async function handleAnthropic(req, res) {
         });
         emit("message_stop", {});
       } else if (ev.type === "error") {
+        // A3: 先把已打开的 content block 关掉，再发 error —— 否则客户端
+        // 永远等不到 content_block_stop，界面会卡在"正在输出"。
+        failed = true;
+        closeBlock();
         const e = typeof ev.error === "string" ? ev.error : ev.error?.message;
-        emit("error", anthropicError(e || "stream error", "api_error").error
-          ? anthropicError(e || "stream error", "api_error") : {});
+        emit("error", anthropicError(e || "stream error", "api_error"));
+        break;
       }
     }
   } catch (e) {
-    emit("error", anthropicError(e.message, "api_error"));
+    failed = true;
+    closeBlock();
+    const msg = sawFinish || sawAbort
+      ? e.message
+      : "upstream stream truncated before completion";
+    emit("error", anthropicError(msg, "api_error"));
+  }
+
+  // A1: 没有 finish 也没有 abort = 上游截断，不能静默当作正常结束
+  if (!failed && !sawFinish && !sawAbort) {
+    closeBlock();
+    emit("error", anthropicError("upstream stream truncated before completion", "api_error"));
   }
   safeEnd(res);
+  abortCh?.cleanup();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -490,15 +625,25 @@ async function handleResponses(req, res) {
   const model = resolveModel(body.model);
   const stream = body.stream === true;
 
-  const upstream = await callUpstream({
-    model,
-    messages: t.messages,
-    system: t.system,
-    tools: t.tools.length ? t.tools : undefined,
-    maxTokens: t.maxTokens,
-    temperature: t.temperature,
-    effort: t.effort,
-  });
+  const abortCh = stream ? makeAbortChannel(res) : null;
+
+  let upstream;
+  try {
+    upstream = await callUpstream({
+      model,
+      messages: t.messages,
+      system: t.system,
+      tools: t.tools.length ? t.tools : undefined,
+      maxTokens: t.maxTokens,
+      temperature: t.temperature,
+      effort: t.effort,
+      signal: abortCh?.signal,
+      apiKey: resolveApiKey(req),
+    });
+  } catch (e) {
+    abortCh?.cleanup();
+    throw e;
+  }
 
   const respId = newResponseId();
 
@@ -703,17 +848,50 @@ async function handleResponses(req, res) {
 // ══════════════════════════════════════════════════════════
 // 直通事件解析（避免重复 JSON.parse）
 // ══════════════════════════════════════════════════════════
+const IDLE_TIMEOUT_MS = Number(argOf("--idle-timeout", "180000"));
+
+/**
+ * 逐行产出上游 NDJSON 事件。
+ *
+ * fetchWithTimeout 的超时只覆盖到响应头，headers 到达后就没有任何时限了。
+ * 上游「发一半静默」会让请求永久挂起，所以这里加 idle 超时：
+ * 超过 IDLE_TIMEOUT_MS 没有新数据就判定卡死并抛错。
+ */
 async function* readEvents(stream) {
   const decoder = new TextDecoder();
   let buf = "";
-  for await (const chunk of stream) {
+  const iterator = stream[Symbol.asyncIterator]();
+  while (true) {
+    const nextPromise = iterator.next();
+    let timer;
+    const timeout = new Promise((_, rej) => {
+      timer = setTimeout(() => {
+        rej(Object.assign(new Error(`upstream idle for ${IDLE_TIMEOUT_MS}ms`), {
+          status: 504, retryable: true, midStream: true,
+        }));
+      }, IDLE_TIMEOUT_MS);
+      timer.unref?.();
+    });
+
+    let step;
+    try {
+      step = await Promise.race([nextPromise, timeout]);
+    } catch (e) {
+      try { await iterator.return?.(); } catch { }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (step.done) break;
+    const chunk = step.value;
     buf += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
     const lines = buf.split("\n");
     buf = lines.pop() ?? "";
     for (const line of lines) {
-      const s = line.trim();
-      if (!s) continue;
-      try { yield JSON.parse(s); } catch { }
+      const line2 = line.trim();
+      if (!line2) continue;
+      try { yield JSON.parse(line2); } catch { }
     }
   }
   const tail = buf.trim();

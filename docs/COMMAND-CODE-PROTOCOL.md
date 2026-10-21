@@ -1,6 +1,6 @@
 # 官方 CLI 上游协议逆向报告
 
-- 目标：`C:\Users\20655\AppData\Roaming\npm\node_modules\command-code\dist\cli.mjs`
+- 目标：`%APPDATA%\npm\node_modules\command-code\dist\cli.mjs`（`npm i -g command-code` 后本机路径）
 - 版本：`command-code@1.50.0`
 - 方法：静态提取（发布产物，2.49 MB，压缩但未混淆，`__name` 标记保留原函数名）
 - 性质：**观察**（源码字面量）/ 推断 / 未知，逐条标注

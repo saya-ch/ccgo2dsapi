@@ -88,7 +88,7 @@ npm run verify                # three-protocol parity verification
 | Anthropic Messages | `http://127.0.0.1:8787` | [anthropic_api](https://api-docs.deepseek.com/guides/anthropic_api) |
 | Responses | `http://127.0.0.1:8787/v1` | [responses_api](https://api-docs.deepseek.com/guides/responses_api) |
 
-Use `proxy-managed` as the API key — it is a sentinel the proxy swaps for the real key in `auth.json`. Any other value is forwarded upstream as your own key and comes back 401.
+Use `proxy-managed` as the API key — it is a sentinel the gateway swaps for the real key in `auth.json`. Leaving it empty works too; any other value is forwarded upstream as your own key and returns 401 if the upstream rejects it.
 
 Model names may be written as `deepseek-v4-flash`, `deepseek-v4.1-flash` or `deepseek-flash`. Per the official docs `deepseek-flash` means **V4.1-Flash**, and this project matches that; `deepseek-v4-flash` and `deepseek-v4.1-flash` are two distinct upstream models, each callable directly. `/v1/models` lists everything available with its context window.
 

@@ -1,8 +1,8 @@
 ﻿#requires -Version 5
 <#
-  ccgo2dsapi / 停止代理
+  ccgo2dsapi / 停止网关
 
-  只停止由 start-proxy.ps1 -Hidden 启动、并记录在 proxy.pid 里的那个进程。
+  优先读 proxy.pid；没有 pid 文件时按端口 + /health + 命令行兜底。
   会先核对命令行，避免 PID 被系统复用后误杀无关进程。
 
   用法：
@@ -14,60 +14,94 @@ param([int]$Port = 0)
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-$cfgPath = Join-Path $root "config.json"
-$cfg = $null
-if (Test-Path $cfgPath) { $cfg = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-if ($Port -le 0) { $Port = if ($cfg -and $cfg.Port) { [int]$cfg.Port } else { 8787 } }
-$pkgName = if ($cfg -and $cfg.ProxyPackage) { $cfg.ProxyPackage } else { "commandcode-api-proxy" }
+function Read-Cfg([string]$dotted, $default) {
+  $p = Join-Path $root "config.json"
+  if (-not (Test-Path $p)) { return $default }
+  try {
+    $cur = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($seg in $dotted.Split('.')) {
+      if ($null -eq $cur) { return $default }
+      $cur = $cur.$seg
+    }
+    if ($null -eq $cur) { return $default }
+    return $cur
+  } catch { return $default }
+}
+
+if ($Port -le 0) { $Port = [int](Read-Cfg "Port" 8787) }
+$HostAddress = [string](Read-Cfg "HostAddress" "127.0.0.1")
+
+# 自研网关的识别特征：命令行里出现 vendor\server.mjs 或 vendor/server.mjs
+$marker = 'vendor[\\/]server\.mjs'
+
+function Test-IsOurs([int]$procId) {
+  if (-not $procId) { return $false }
+  $info = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction SilentlyContinue
+  if (-not $info) { return $false }
+  return ($info.CommandLine -match $marker)
+}
 
 $pidFile = Join-Path $root "proxy.pid"
+$stopped = $false
 
-if (-not (Test-Path $pidFile)) {
-  # 没有 pid 文件时按端口兜底：用 /health 自报的版本确认归属，再停掉
-  $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-  if (-not $conn) {
-    Write-Host "端口 $Port 没有监听，代理应该已经停了。"
-  } else {
-    $pidFromPort = ($conn | Select-Object -First 1).OwningProcess
-    $procFromPort = Get-CimInstance Win32_Process -Filter "ProcessId = $pidFromPort" -ErrorAction SilentlyContinue
-    $looksOurs = $procFromPort -and $procFromPort.CommandLine -match [regex]::Escape($pkgName)
-    try {
-      $h = Invoke-RestMethod "http://${HostAddress}:${Port}/health" -TimeoutSec 2
-      if (-not $h -or -not $h.version) { $looksOurs = $false }
-    } catch { $looksOurs = $false }
-    if ($looksOurs) {
-      Stop-Process -Id $pidFromPort -Force
-      Write-Host "已按端口停止代理（PID $pidFromPort）。"
+# ── 优先按 pid 文件 ────────────────────────────────────────
+if (Test-Path $pidFile) {
+  $proxyPid = (Get-Content $pidFile -Raw).Trim()
+  if ($proxyPid -match '^\d+$') {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $proxyPid" -ErrorAction SilentlyContinue
+    if (-not $proc) {
+      Write-Host "PID $proxyPid 已不存在，清理 pid 文件。"
+    } elseif (Test-IsOurs $proxyPid) {
+      Stop-Process -Id $proxyPid -Force -ErrorAction SilentlyContinue
+      Write-Host "已停止网关（PID $proxyPid）。"
+      $stopped = $true
     } else {
-      Write-Host "端口 $Port 被 PID $pidFromPort 占用，但不是本代理，未处理。"
+      Write-Host "PID $proxyPid 不是本项目的网关进程，未处理：$($proc.CommandLine)"
     }
   }
-} else {
-  $proxyPid = (Get-Content $pidFile -Raw).Trim()
-  $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $proxyPid" -ErrorAction SilentlyContinue
-  if (-not $proc) {
-    Write-Host "PID $proxyPid 已不存在，清理 pid 文件。"
-    Remove-Item $pidFile -Force
-  } elseif ($proc.CommandLine -notmatch [regex]::Escape($pkgName)) {
-    Write-Host "PID $proxyPid 不是本代理进程，拒绝操作：$($proc.CommandLine)"
-    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+  Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+}
+
+# ── 兜底：按端口找 ─────────────────────────────────────────
+if (-not $stopped) {
+  $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  if (-not $conn) {
+    Write-Host "端口 $Port 没有监听，网关应该已经停了。"
   } else {
-    Stop-Process -Id $proxyPid -Force
-    Remove-Item $pidFile -Force
-    Write-Host "已停止代理（PID $proxyPid）。"
+    $pidFromPort = ($conn | Select-Object -First 1).OwningProcess
+    if (Test-IsOurs $pidFromPort) {
+      Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
+      Write-Host "已按端口停止网关（PID $pidFromPort）。"
+      $stopped = $true
+    } else {
+      $info = Get-CimInstance Win32_Process -Filter "ProcessId = $pidFromPort" -ErrorAction SilentlyContinue
+      Write-Host "端口 $Port 被 PID $pidFromPort 占用，但不是本项目的网关，未处理。"
+      if ($info) { Write-Host "  命令行：$($info.CommandLine)" -ForegroundColor DarkGray }
+    }
   }
 }
 
+# ── 顺手清理备用端口上的残留实例 ──────────────────────────
+$stagePort = $Port + 100
+$stageConn = Get-NetTCPConnection -LocalPort $stagePort -State Listen -ErrorAction SilentlyContinue
+if ($stageConn) {
+  $stagePid = ($stageConn | Select-Object -First 1).OwningProcess
+  if (Test-IsOurs $stagePid) {
+    Stop-Process -Id $stagePid -Force -ErrorAction SilentlyContinue
+    Write-Host "已清理备用端口 $stagePort 上的实例（PID $stagePid）。"
+  }
+}
 
-
-# Responses 适配层是独立进程，一并停掉，避免只剩它在监听
-$rsPort = if ($cfg -and $cfg.Responses -and $cfg.Responses.Port) { [int]$cfg.Responses.Port } else { 8788 }
-$rsConn = Get-NetTCPConnection -LocalPort $rsPort -State Listen -ErrorAction SilentlyContinue
-if ($rsConn) {
-  $rsPid = ($rsConn | Select-Object -First 1).OwningProcess
-  $rsProc = Get-CimInstance Win32_Process -Filter "ProcessId = $rsPid" -ErrorAction SilentlyContinue
-  if ($rsProc -and $rsProc.CommandLine -match 'responses-server') {
-    Stop-Process -Id $rsPid -Force
-    Write-Host "已停止 Responses 适配层（PID $rsPid，端口 $rsPort）。"
+# ── 旧版本可能留下的 8788 适配层 ──────────────────────────
+$legacyPort = 8788
+if ($legacyPort -ne $Port) {
+  $legacyConn = Get-NetTCPConnection -LocalPort $legacyPort -State Listen -ErrorAction SilentlyContinue
+  if ($legacyConn) {
+    $legacyPid = ($legacyConn | Select-Object -First 1).OwningProcess
+    $legacyInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $legacyPid" -ErrorAction SilentlyContinue
+    if ($legacyInfo -and $legacyInfo.CommandLine -match 'responses-server') {
+      Stop-Process -Id $legacyPid -Force -ErrorAction SilentlyContinue
+      Write-Host "已清理旧版 Responses 适配层（PID $legacyPid）。"
+    }
   }
 }

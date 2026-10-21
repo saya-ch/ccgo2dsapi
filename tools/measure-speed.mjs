@@ -41,6 +41,7 @@ function measure(model) {
       messages: [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
       stream: true,
+      stream_options: { include_usage: true },
     });
 
     const t0 = Date.now();

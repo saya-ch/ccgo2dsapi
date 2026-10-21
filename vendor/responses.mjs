@@ -167,7 +167,10 @@ export function toResponsesUsage(u) {
     input_tokens: w.prompt_tokens ?? 0,
     input_tokens_details: { cached_tokens: w.prompt_cache_hit_tokens ?? 0 },
     output_tokens: w.completion_tokens ?? 0,
-    output_tokens_details: { reasoning_tokens: 0 },
+    // A8: 之前写死 0，导致 Responses 路径的推理 token 统计永远是 0
+    output_tokens_details: {
+      reasoning_tokens: w.completion_tokens_details?.reasoning_tokens ?? 0,
+    },
     total_tokens: w.total_tokens ?? 0,
   };
 }

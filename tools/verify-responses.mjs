@@ -82,7 +82,7 @@ console.log("\n=== 2. input item 列表 + reasoning.effort ===");
   else if (r.status !== 200) { console.log("  FAIL", r.status, r.raw.slice(0, 150)); diffs++; }
   else {
     const types = (r.json.output ?? []).map((i) => i.type);
-    check("input 为 item 列表时可用", true, "HTTP 200");
+    check("input 为 item 列表时可用", r.status === 200 && (r.json?.output ?? []).length > 0, `HTTP ${r.status}, items=${(r.json?.output ?? []).length}`);
     check("含 reasoning item", types.includes("reasoning"), types.join(", "), "reasoning");
     const rs = (r.json.output ?? []).find((i) => i.type === "reasoning");
     if (rs) check("content[0].type == reasoning_text", rs.content?.[0]?.type === "reasoning_text", rs.content?.[0]?.type, "reasoning_text");

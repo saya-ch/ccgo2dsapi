@@ -105,7 +105,7 @@ console.log("\n=== 3. thinking 开关（官方：budget_tokens 被忽略）===")
     messages: [{ role: "user", content: "What is 17*23? Think it through." }],
   });
   if (!isQuota(en)) {
-    check("budget_tokens >= max_tokens 不被拒绝", en.status !== 400, `HTTP ${en.status}`, "官方忽略 budget_tokens");
+    check("budget_tokens >= max_tokens 不被拒绝", en.status === 200, `HTTP ${en.status}`, "官方忽略 budget_tokens，应返回 200");
     const blocks = (en.json?.content ?? []).map((b) => b.type);
     check("enabled 时返回 thinking 块", blocks.includes("thinking"), blocks.join(", ") || `HTTP ${en.status}`, "thinking");
   } else {
@@ -119,7 +119,7 @@ console.log("\n=== 3. thinking 开关（官方：budget_tokens 被忽略）===")
   });
   if (!isQuota(dis)) {
     const blocks = (dis.json?.content ?? []).map((b) => b.type);
-    check("disabled 时不返回 thinking 块", !blocks.includes("thinking"), blocks.join(", ") || `HTTP ${dis.status}`, "无 thinking");
+    check("disabled 时不返回 thinking 块", dis.status === 200 && !blocks.includes("thinking"), `${blocks.join(", ") || "空"} (HTTP ${dis.status})`, "200 且无 thinking");
   } else {
     console.log("  SKIP  额度已用尽");
   }

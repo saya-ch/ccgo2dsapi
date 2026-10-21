@@ -71,7 +71,7 @@ console.log("\n=== 3. /v1/models 元数据（官方含 context_window/max_output
   const ids = (r.parsed?.data || []).map((m) => m.id);
   const others = ids.filter((i) => !/^deepseek\//.test(i));
   const m = (r.parsed?.data || []).find((x) => x.id === MODEL);
-  show("只返回 DeepSeek 模型", others.length === 0,
+  show("只返回 DeepSeek 模型", ids.length > 0 && others.length === 0,
     `deepseek ${ids.length - others.length} 个 / 其它 ${others.length} 个`,
     "官方只返回自家 2 个模型");
   show("含 context_window", m?.context_window !== undefined, String(m?.context_window), "1048576");

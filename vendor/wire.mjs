@@ -8,7 +8,7 @@
 //   · 默认 max_tokens = 64000
 //   · 截断判定：既无 finish 也无 abort 即视为截断，抛可重试错误
 //
-// 证据见 workspace/官方CLI协议逆向报告.md 第 2、3、4、6 节。
+// 证据见 docs/COMMAND-CODE-PROTOCOL.md 第 2、3、4、6 节。
 
 import crypto from "node:crypto";
 
