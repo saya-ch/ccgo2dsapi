@@ -224,6 +224,27 @@ several deviations:
 
 `npm run verify` checks all three protocols item by item, 0 diffs each.
 
+Two query endpoints sit alongside the protocols:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /user/balance` | the official `/user/balance` shape, remaining credit |
+| `GET /user/quota` | this project's shape, with 5-hour and weekly windows |
+
+`/user/quota` returns used, cap, percent and reset time per window, plus the
+monthly credit pool.
+
+```json
+{
+  "plan_id": "individual-go-v1",
+  "credits": { "monthly": 5.35, "purchased": 0, "free": 0, "total": 5.35 },
+  "windows": {
+    "five_hour": { "used": 1.64, "cap": 3, "percent": 55, "reset_at": 1792602021321 },
+    "weekly":    { "used": 4.65, "cap": 6, "percent": 77, "reset_at": 1793170293513 }
+  }
+}
+```
+
 ## Configuration
 
 `config.json`, copied from `config.example.json` and already in `.gitignore`.

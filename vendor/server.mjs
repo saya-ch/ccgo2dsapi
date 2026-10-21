@@ -685,33 +685,107 @@ function handleModels(res) {
   sendJson(res, 200, { object: "list", data });
 }
 
-async function handleBalance(res) {
+// 额度结构依据官方 CLI 的 projectUsageView：
+//   credits.data.credits.monthlyCredits / purchasedCredits / freeCredits
+//   credits.data.windowLimits.fiveHour {used, cap, resetAt}
+//   credits.data.windowLimits.weekly  {used, cap, resetAt}
+//   subscription.data.planId / status / currentPeriodEnd
+async function fetchUsage() {
   const apiKey = readApiKey();
   const { traceId, spanId } = generateTraceIds();
   const headers = buildHeaders({ authKey: apiKey, cliVersion: CLI_VERSION, traceId, spanId });
-  try {
-    const r = await fetchWithTimeout(API_BASE + ROUTE_CREDITS, { method: "GET", headers }, 15000);
-    const j = await r.json();
-    // 官方 /user/balance 形状
-    const windows = j.windows || j;
-    const pick = (k) => {
-      const w = windows[k];
-      return w ? { used: w.used ?? 0, total: w.limit ?? w.total ?? 0 } : null;
+
+  const get = async (route) => {
+    const r = await fetchWithTimeout(API_BASE + route, { method: "GET", headers }, 15000);
+    if (!r.ok) throw new Error(`${route} -> HTTP ${r.status}`);
+    return r.json();
+  };
+
+  // credits / subscriptions 各自独立，任一失败不影响另一个
+  const [credits, subscription] = await Promise.all([
+    get(ROUTE_CREDITS).catch((e) => ({ __error: e.message })),
+    get(ROUTE_SUBSCRIPTIONS).catch((e) => ({ __error: e.message })),
+  ]);
+  return { credits, subscription };
+}
+
+/** 归一成统一的窗口结构 */
+function normalizeWindows(creditsData) {
+  const c = creditsData?.credits || creditsData?.data?.credits || {};
+  const wl = c.windowLimits || creditsData?.windowLimits || {};
+
+  const win = (w, label) => {
+    if (!w) return null;
+    const used = Number(w.used ?? 0);
+    const cap = Number(w.cap ?? w.limit ?? 0);
+    return {
+      label,
+      used,
+      cap,
+      left: Math.max(0, cap - used),
+      percent: cap > 0 ? Math.round((used / cap) * 100) : 0,
+      reset_at: w.resetAt ?? w.reset_at ?? null,
     };
-    const fiveHour = pick("fiveHour") || pick("5h");
-    const monthly = pick("monthly") || pick("month");
+  };
+
+  return {
+    five_hour: win(wl.fiveHour ?? wl.five_hour, "5-hour"),
+    weekly: win(wl.weekly, "weekly"),
+    monthly_credits: Number(c.monthlyCredits ?? 0),
+    purchased_credits: Number(c.purchasedCredits ?? 0),
+    free_credits: Number(c.freeCredits ?? 0),
+    plan_id: c.planId ?? creditsData?.planId ?? null,
+  };
+}
+
+async function handleBalance(res) {
+  try {
+    const { credits, subscription } = await fetchUsage();
+    const w = normalizeWindows(credits);
+    const total = w.monthly_credits + w.purchased_credits + w.free_credits;
+
+    // 官方 /user/balance 形状
     sendJson(res, 200, {
       is_available: true,
       balance_infos: [{
         currency: "USD",
-        total_balance: String(monthly?.total ?? 0),
-        granted_balance: String(monthly?.total ?? 0),
-        topped_up_balance: "0",
+        total_balance: total.toFixed(2),
+        granted_balance: (w.monthly_credits + w.free_credits).toFixed(2),
+        topped_up_balance: w.purchased_credits.toFixed(2),
       }],
-      raw: j,
     });
   } catch (e) {
-    sendJson(res, 502, openAIError("upstream credits fetch failed: " + e.message, "upstream_error"));
+    sendJson(res, 502, openAIError("usage fetch failed: " + e.message, "upstream_error"));
+  }
+}
+
+/** 更实用的额度视图（面板/自检用），形状是本项目自己的 */
+async function handleQuota(res) {
+  try {
+    const { credits, subscription } = await fetchUsage();
+    const w = normalizeWindows(credits);
+    const sub = subscription?.data ?? subscription ?? {};
+    sendJson(res, 200, {
+      plan_id: sub.planId ?? w.plan_id,
+      status: sub.status ?? null,
+      current_period_end: sub.currentPeriodEnd ?? null,
+      credits: {
+        monthly: w.monthly_credits,
+        purchased: w.purchased_credits,
+        free: w.free_credits,
+        total: w.monthly_credits + w.purchased_credits + w.free_credits,
+      },
+      windows: {
+        five_hour: w.five_hour,
+        weekly: w.weekly,
+      },
+      raw_errors: {
+        credits: credits?.__error ?? null,
+        subscription: subscription?.__error ?? null,
+      },
+    });
+  } catch (e) {
+    sendJson(res, 502, openAIError("usage fetch failed: " + e.message, "upstream_error"));
   }
 }
 
@@ -733,6 +807,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url === "/v1/models") return handleModels(res);
     if (req.method === "GET" && (url === "/user/balance" || url === "/v1/user/balance")) return await handleBalance(res);
+    if (req.method === "GET" && (url === "/user/quota" || url === "/v1/user/quota")) return await handleQuota(res);
     if (req.method === "POST" && (url === "/v1/chat/completions" || url === "/chat/completions")) return await handleOpenAI(req, res);
     if (req.method === "POST" && (url === "/v1/messages" || url === "/messages")) return await handleAnthropic(req, res);
     if (req.method === "POST" && (url === "/v1/responses" || url === "/responses")) return await handleResponses(req, res);
@@ -769,5 +844,6 @@ server.listen(PORT, HOST, () => {
   console.log(`[gateway]   POST /v1/responses          (Responses)`);
   console.log(`[gateway]   GET  /v1/models`);
   console.log(`[gateway]   GET  /user/balance`);
+  console.log(`[gateway]   GET  /user/quota`);
   console.log(`[gateway] upstream: ${API_BASE}`);
 });

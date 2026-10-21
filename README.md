@@ -226,6 +226,26 @@ vendor/
 
 `npm run verify` 对三套协议逐项对齐验证，全部 0 处差异。
 
+除三套协议外还提供两个查询端点：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /user/balance` | 官方 `/user/balance` 形状，返回剩余额度 |
+| `GET /user/quota` | 本项目形状，含 5 小时 / 每周窗口的已用、上限、重置时刻 |
+
+`/user/quota` 的返回示例：
+
+```json
+{
+  "plan_id": "individual-go-v1",
+  "credits": { "monthly": 5.35, "purchased": 0, "free": 0, "total": 5.35 },
+  "windows": {
+    "five_hour": { "used": 1.64, "cap": 3, "percent": 55, "reset_at": 1792602021321 },
+    "weekly":    { "used": 4.65, "cap": 6, "percent": 77, "reset_at": 1793170293513 }
+  }
+}
+```
+
 ## 配置
 
 `config.json`（由 `config.example.json` 复制，已加入 `.gitignore`）。
