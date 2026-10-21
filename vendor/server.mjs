@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  buildHeaders, buildGenerateBody, toWireTools, toWireSystem, toWireMessages,
+  buildHeaders, buildGenerateBody,
   consumeStream, generateSessionId, generateTraceIds, toWirePermissionMode,
   ROUTE_GENERATE, ROUTE_CREDITS, ROUTE_SUBSCRIPTIONS, ROUTE_WHOAMI,
   DEFAULT_MAX_TOKENS, fetchWithTimeout, isRetryableStatus, hasTerminalMarker,

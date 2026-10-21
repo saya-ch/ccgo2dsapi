@@ -116,82 +116,8 @@ export function toWireToolOutput(content) {
   };
 }
 
-export function toWireTools(tools) {
-  if (!Array.isArray(tools)) return undefined;
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.input_schema,
-  }));
-}
 
-export function toWireSystem(sections) {
-  if (typeof sections === "string") return sections;
-  if (!Array.isArray(sections) || sections.length === 0) return undefined;
-  const last = sections.length - 1;
-  return sections.map((s, i) => ({
-    type: "text",
-    text: i < last ? `${s.text}\n` : s.text,
-    ...(s.cache ? { cache_control: { type: "ephemeral" } } : {}),
-  }));
-}
 
-/**
- * Anthropic 风格的 messages -> 上游 wire messages。
- * 观察自 cli.mjs 的 toWireMessages；顺序规则：tool 结果消息先于 user 内容消息。
- */
-export function toWireMessages(messages) {
-  const out = [];
-  const toolNames = new Map();
-
-  for (const msg of messages || []) {
-    if (msg.role === "assistant") {
-      const content = [];
-      for (const part of msg.content || []) {
-        if (part.type === "text") {
-          content.push({ type: "text", text: part.text });
-        } else if (part.type === "tool_use") {
-          if (part.providerExecuted) continue;
-          const name = toWireToolName(part.name);
-          toolNames.set(part.id, name);
-          content.push({ type: "tool-call", toolCallId: part.id, toolName: name, input: part.input });
-        } else if (part.type === "thinking") {
-          content.push({ type: "reasoning", text: part.thinking });
-        }
-      }
-      out.push({ role: "assistant", content });
-      continue;
-    }
-
-    const toolParts = [];
-    const userParts = [];
-    for (const part of msg.content || []) {
-      if (part.type === "text") {
-        userParts.push({ type: "text", text: part.text });
-      } else if (part.type === "image") {
-        const mime = part.source?.media_type || "image/png";
-        userParts.push({
-          type: "image",
-          image: part.source?.data
-            ? `data:${mime};base64,${part.source.data}`
-            : part.image || "",
-          mimeType: mime, // 官方有，第三方包缺
-        });
-      } else if (part.type === "tool_result") {
-        toolParts.push({
-          type: "tool-result",
-          toolCallId: part.tool_use_id,
-          toolName: toolNames.get(part.tool_use_id) ?? "unknown",
-          output: toWireToolOutput(part.content),
-        });
-      }
-    }
-    if (toolParts.length > 0) out.push({ role: "tool", content: toolParts });
-    if (userParts.length > 0) out.push({ role: "user", content: userParts });
-  }
-
-  return out;
-}
 
 // ── 请求体 ────────────────────────────────────────────────
 /**
@@ -301,15 +227,24 @@ export async function consumeStream(stream, opts = {}) {
       if (thinking) content.push({ type: "thinking", thinking, signature: "" });
       thinking = "";
       thinkingOpen = false;
+      // 关键：关闭当前 text 块。否则后续 text 会继续累加到前面那个
+      // textPart 里，产出 [thinking1, text1+text2, thinking2] 这种错序，
+      // Anthropic / Responses 客户端会拒绝或丢弃这类块序。
+      textPart = null;
     }
   };
 
   for await (const ev of readNdjson(stream)) {
+    // 上游理论上可能发一行字面量 null，直接取 .type 会抛 TypeError，
+    // 那样会丢掉可重试标记，变成未分类异常。跳过非对象事件。
+    if (!ev || typeof ev !== "object") continue;
     const t = ev.type;
 
     if (t === "abort") { sawAbort = true; continue; }
 
     if (t === "text-delta") {
+      // 多段推理：text 开始说明当前 thinking 段已结束
+      if (thinkingOpen) finalizeThinking();
       if (!textPart) {
         textPart = { type: "text", text: "" };
         content.push(textPart);
@@ -342,6 +277,7 @@ export async function consumeStream(stream, opts = {}) {
     }
 
     if (t === "tool-call") {
+      if (thinkingOpen) finalizeThinking();
       textPart = null;
       const name = ev.toolName ?? "";
       const input = ev.input ?? ev.args;
@@ -379,9 +315,9 @@ export async function consumeStream(stream, opts = {}) {
         usage.reasoningTokens = u.outputTokenDetails?.reasoningTokens ?? u.reasoningTokens ?? 0;
       }
       rawFinishReason = ev.rawFinishReason ?? ev.finishReason;
-      stopReason = ev.finishReason === "tool-calls" ? "tool_calls"
-        : ev.finishReason === "length" ? "max_tokens"
-          : "end_turn";
+      // 用统一的归一函数：它处理 max_tokens / tool_use / 大写变体，
+      // 内联三元只认两个字面值，会把截断误判成正常结束。
+      stopReason = normalizeStopReason(rawFinishReason);
       systemPromptTokens = ev.systemPromptTokens ?? systemPromptTokens;
       continue;
     }

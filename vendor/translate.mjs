@@ -100,7 +100,7 @@ export function wireToOpenAIMessage(content) {
   const toolCalls = [];
 
   for (const c of content || []) {
-    if (c.type === "text") text += c.text;
+    if (c.type === "text") text += c.text ?? "";
     else if (c.type === "thinking") reasoning += c.thinking;
     else if (c.type === "tool_use") {
       toolCalls.push({
@@ -128,7 +128,9 @@ export function wireToOpenAIUsage(u) {
   if (!u) return undefined;
   const prompt = u.inputTokens ?? 0;
   const completion = u.outputTokens ?? 0;
-  const cached = u.cacheReadTokens ?? 0;
+  // 上游偶尔会报 cacheReadTokens > inputTokens。两边必须用同一个口径，
+  // 否则会产出 hit + miss > prompt_tokens 的自相矛盾数字。
+  const cached = Math.min(u.cacheReadTokens ?? 0, prompt);
   return {
     prompt_tokens: prompt,
     completion_tokens: completion,
@@ -159,7 +161,10 @@ export function anthropicToWire(req) {
       const content = [];
       for (const p of toArray(m.content)) {
         if (p.type === "text") content.push({ type: "text", text: p.text });
-        else if (p.type === "thinking") content.push({ type: "thinking", thinking: p.thinking });
+        // 上游 wire 的 reasoning 块是 { type: "reasoning", text }，
+        // 不是内部块形状 { type: "thinking", thinking }。
+        // 写错会被上游当未知类型忽略（历史思考丢失）或 400 拒整条请求。
+        else if (p.type === "thinking") content.push({ type: "reasoning", text: p.thinking ?? "" });
         else if (p.type === "tool_use") {
           toolNames.set(p.id, p.name);
           content.push({ type: "tool-call", toolCallId: p.id, toolName: p.name, input: p.input });
@@ -214,14 +219,18 @@ export function anthropicToWire(req) {
  * 官方忽略 budget_tokens，这里按 effort 折算。
  */
 export function anthropicEffort(req) {
+  const th = req.thinking;
+
+  // 显式 disabled 优先级最高：客户端明确说"别思考"，不能被
+  // output_config.effort 覆盖，否则白烧 reasoning token。
+  if (th && th.type === "disabled") return "off";
+
   const oc = req.output_config?.effort;
   if (typeof oc === "string") {
     const k = oc.toLowerCase();
     if (k === "none") return "off";
     if (k === "low" || k === "high" || k === "max") return k;
   }
-  const th = req.thinking;
-  if (th && th.type === "disabled") return "off";
   if (th && th.type === "enabled") {
     const budget = th.budget_tokens;
     if (typeof budget !== "number") return undefined;
