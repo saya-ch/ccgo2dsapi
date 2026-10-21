@@ -1,4 +1,4 @@
-#requires -Version 5
+﻿#requires -Version 5
 <#
   ccgo2dsapi —— 本地反代启动器 + 额度面板
   ────────────────────────────────────────
@@ -105,13 +105,24 @@ if ($pnNode) {
 $ESC = [char]27
 $script:UseColor = -not $NoColor
 try { if ([Console]::IsOutputRedirected) { $script:UseColor = $false } } catch { $script:UseColor = $false }
-# P2-10: 旧 conhost 未启用 VT 时，ESC 序列会原样显示成 ←[36m 乱码。
-# PowerShell 5.1 下若注册表没有 VirtualTerminalLevel，就退回纯文本。
-if ($script:UseColor -and $PSVersionTable.PSVersion.Major -lt 6) {
+
+# P2-10: 极旧的 conhost 不认 VT 序列，会把 ESC[36m 显示成 ←[36m。
+# 但不能拿「注册表里有没有 VirtualTerminalLevel」当判据 —— 现代 conhost
+# 与 Windows Terminal 默认支持 VT，该键常常不存在，那样会误关颜色。
+# 改为实测：写一个 ESC 序列，看光标是否被推进。
+#   VT 被解释 → 序列不占字符，光标不动
+#   被当字面量 → 推进若干个字符
+# 探针只设颜色后立即重置，不产生可见文字，不影响面板排版。
+if ($script:UseColor) {
   try {
-    $vtLevel = (Get-ItemProperty -Path "HKCU:\Console" -Name VirtualTerminalLevel -ErrorAction SilentlyContinue).VirtualTerminalLevel
-    if ($null -eq $vtLevel) { $script:UseColor = $false }
-  } catch { $script:UseColor = $false }
+    $probeX = [Console]::CursorLeft
+    [Console]::Write("$ESC[36m")
+    $deltaX = [Console]::CursorLeft - $probeX
+    [Console]::ResetColor()
+    if ($deltaX -ge 4) { $script:UseColor = $false }
+  } catch {
+    # 探针失败就保守保留颜色（用户还能用 -NoColor 关）
+  }
 }
 
 $script:ANSI = @{

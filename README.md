@@ -12,6 +12,13 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/DeepSeek-V4.1-4D6BFE" alt="DeepSeek V4.1">
+  <img src="https://img.shields.io/badge/OpenAI-Chat%20Completions-412991?logo=openai&logoColor=white" alt="OpenAI Chat Completions">
+  <img src="https://img.shields.io/badge/Anthropic-Messages-D97757?logo=anthropic&logoColor=white" alt="Anthropic Messages">
+  <img src="https://img.shields.io/badge/OpenAI-Responses-412991?logo=openai&logoColor=white" alt="OpenAI Responses">
+</p>
+
+<p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="#接口">接口</a> ·
   <a href="#客户端">客户端</a> ·
