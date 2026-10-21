@@ -97,13 +97,15 @@ export function toWirePermissionMode(mode) {
   return "standard";
 }
 
-/** 工具名映射钩子（官方是 rw -> nw 的单点替换，这里留可配） */
-let toolNameMap = new Map();
-export function setToolNameMap(m) {
-  toolNameMap = m instanceof Map ? m : new Map(Object.entries(m || {}));
-}
+/**
+ * 工具名直通。
+ *
+ * 早期版本在这里挂了一个模块级 Map 做名字替换，但从未被调用，
+ * 而且是跨请求共享的可变状态 —— 一旦真有人用上，并发请求会互相污染。
+ * 现在工具名原样透传；如将来确实需要改写，应当按请求传参而非用全局。
+ */
 export function toWireToolName(name) {
-  return toolNameMap.get(name) ?? name;
+  return name;
 }
 
 export function toWireToolOutput(content) {
@@ -267,9 +269,10 @@ export async function* readNdjson(stream) {
       }
     }
   }
+  // 尾部残留可能是不完整的一行，解析失败属正常，跳过即可
   const tail = buf.trim();
   if (tail) {
-    try { yield JSON.parse(tail); } catch { }
+    try { yield JSON.parse(tail); } catch { /* 不完整的尾行，丢弃 */ }
   }
 }
 

@@ -1,20 +1,17 @@
 {
   "name": "ccgo2dsapi",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Turn a Command Code Go plan into a local DeepSeek-compatible API, with a live quota panel",
+  "description": "Serve DeepSeek's three API protocols locally from a Command Code Go plan, with a quota panel",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "patch": "echo 'no patches needed: the gateway is self-developed'",
-    "patch:check": "echo 'no patches needed'",
-    "patch:restore": "echo 'no patches needed'",
+    "start": "node vendor/server.mjs",
     "verify": "node tools/verify-all.mjs",
     "verify:openai": "node tools/verify-parity.mjs",
     "verify:anthropic": "node tools/verify-anthropic.mjs",
     "verify:responses": "node tools/verify-responses.mjs",
-    "responses": "node tools/responses-server.mjs",
-    "speed": "node tools/measure-speed.mjs --port 8787 --models deepseek/deepseek-v4-flash"
+    "speed": "node tools/measure-speed.mjs --port 8787 --models deepseek-v4.1-flash,deepseek-v4-pro"
   },
   "engines": {
     "node": ">=24"

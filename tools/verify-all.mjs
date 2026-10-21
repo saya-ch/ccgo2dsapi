@@ -14,10 +14,11 @@ import http from "node:http";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
+// 自研网关把三套协议放在同一个端口上
 const suites = [
   { name: "OpenAI Chat Completions", script: "verify-parity.mjs", port: 8787 },
   { name: "Anthropic Messages", script: "verify-anthropic.mjs", port: 8787 },
-  { name: "Responses", script: "verify-responses.mjs", port: 8788 },
+  { name: "Responses", script: "verify-responses.mjs", port: 8787 },
 ];
 
 function probeHealth(port) {
@@ -62,11 +63,7 @@ for (const s of suites) {
 
   if (!alive) {
     console.log(`  SKIP  端口 ${s.port} 没有服务在监听`);
-    if (s.port === 8788) {
-      console.log("         Responses 需要 tools/responses-server.mjs，用 .\\launch.ps1 启动会自动拉起");
-    } else {
-      console.log("         先启动代理：.\\launch.ps1 或 .\\scripts\\start-proxy.ps1");
-    }
+    console.log("        先启动网关：.\\launch.ps1 或 npm start");
     results.push({ ...s, status: "skipped", diffs: null });
     continue;
   }
@@ -92,12 +89,19 @@ for (const r of results) {
   if (r.status === "fail") failed++;
 }
 
+const passed = results.filter((r) => r.status === "pass").length;
+const skipped = results.filter((r) => r.status === "skipped").length;
+
 console.log("");
-if (failed === 0) {
-  const passed = results.filter((r) => r.status === "pass").length;
-  console.log(`  ${passed}/${results.length} 套协议验证通过`);
-  process.exit(0);
-} else {
-  console.log(`  ${failed} 套协议未通过`);
+if (skipped > 0) {
+  // SKIP 不等于通过：服务没起来时一个断言都没跑，说「通过」是假绿。
+  console.log(`  ${passed}/${results.length} 套通过，${skipped} 套因服务未启动被跳过`);
+  console.log("  未验证不等于通过，退出码 1");
   process.exit(1);
 }
+if (failed === 0) {
+  console.log(`  ${passed}/${results.length} 套协议验证通过`);
+  process.exit(0);
+}
+console.log(`  ${failed} 套协议未通过`);
+process.exit(1);

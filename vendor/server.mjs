@@ -45,9 +45,35 @@ const MAX_BODY = 48 * 1024 * 1024;
 const TIMEOUT_MS = Number(argOf("--timeout", "600000"));
 const ALLOW_CORS = args.includes("--cors");
 const LOG_LEVEL = argOf("--log-level", "info");
+// 传了 --log-file 就自己落盘。这样启动方不必用重定向接管子进程的
+// stdout/stderr 句柄 —— 那会让 Start-Process 一直等到子进程退出。
+const LOG_FILE = argOf("--log-file", "");
+
+let logStream = null;
+function openLogFile() {
+  if (!LOG_FILE) return;
+  try {
+    logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
+    logStream.on("error", () => { logStream = null; });
+  } catch { logStream = null; }
+}
+openLogFile();
+
+function writeLine(line) {
+  if (logStream) {
+    try { logStream.write(line + "\n"); } catch { }
+  } else {
+    console.log(line);
+  }
+}
 
 function log(...a) {
-  if (LOG_LEVEL !== "silent") console.log("[gateway]", ...a);
+  if (LOG_LEVEL === "silent") return;
+  writeLine("[gateway] " + a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+}
+
+function logError(...a) {
+  writeLine("[gateway] " + a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
 }
 
 // ── 鉴权：从 auth.json 读真实 key ─────────────────────────
@@ -133,6 +159,26 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
 }
 
 // ── HTTP 工具 ─────────────────────────────────────────────
+/**
+ * 安全写入：客户端可能已经断开（流式响应尤其常见），
+ * 此时 res.write 会抛 ERR_STREAM_WRITE_AFTER_END 或静默失败。
+ * 所有流式输出都走这里，断开后直接跳过，不制造未捕获异常。
+ */
+function safeWrite(res, chunk) {
+  if (res.writableEnded || res.destroyed) return false;
+  try {
+    res.write(chunk);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeEnd(res) {
+  if (res.writableEnded || res.destroyed) return;
+  try { res.end(); } catch { }
+}
+
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
@@ -256,7 +302,7 @@ async function handleOpenAI(req, res) {
   }
 
   sendSseHeaders(res);
-  const emit = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  const emit = (obj) => safeWrite(res, `data: ${JSON.stringify(obj)}\n\n`);
   const chunk = (delta, finish = null) => ({
     id, object: "chat.completion.chunk", created, model,
     choices: [{ index: 0, delta, finish_reason: finish }],
@@ -266,8 +312,6 @@ async function handleOpenAI(req, res) {
 
   let sawToolUse = false;
   let toolIndex = 0;
-  let pendingToolName = null;
-  let pendingArgs = "";
 
   try {
     for await (const ev of readEvents(upstream.body)) {
@@ -278,14 +322,24 @@ async function handleOpenAI(req, res) {
       } else if (ev.type === "tool-call") {
         sawToolUse = true;
         const args = JSON.stringify(ev.input ?? {});
+        const idx = toolIndex++;
+        const callId = ev.toolCallId || "call_" + Math.random().toString(36).slice(2, 10);
+
+        // 首片：带 id / name，arguments 为空字符串
         emit(chunk({
           tool_calls: [{
-            index: toolIndex++,
-            id: ev.toolCallId || "call_" + Math.random().toString(36).slice(2, 10),
+            index: idx,
+            id: callId,
             type: "function",
-            function: { name: ev.toolName ?? "", arguments: args },
+            function: { name: ev.toolName ?? "", arguments: "" },
           }],
         }));
+        // 次片：只有 index + arguments 增量，与官方分片形态一致
+        if (args.length > 0) {
+          emit(chunk({
+            tool_calls: [{ index: idx, function: { arguments: args } }],
+          }));
+        }
       } else if (ev.type === "finish") {
         const u = ev.totalUsage;
         const usage = wireToOpenAIUsage({
@@ -307,8 +361,8 @@ async function handleOpenAI(req, res) {
   } catch (e) {
     emit(openAIError(e.message, "upstream_error"));
   }
-  res.write("data: [DONE]\n\n");
-  res.end();
+  safeWrite(res, "data: [DONE]\n\n");
+  safeEnd(res);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -348,7 +402,7 @@ async function handleAnthropic(req, res) {
 
   sendSseHeaders(res);
   const emit = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
+    safeWrite(res, `event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
   };
 
   emit("message_start", {
@@ -419,7 +473,7 @@ async function handleAnthropic(req, res) {
   } catch (e) {
     emit("error", anthropicError(e.message, "api_error"));
   }
-  res.end();
+  safeEnd(res);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -465,7 +519,7 @@ async function handleResponses(req, res) {
   sendSseHeaders(res);
   const nextSeq = createSeq();
   const emit = (type, payload) => {
-    res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: nextSeq(), ...payload })}\n\n`);
+    safeWrite(res, `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: nextSeq(), ...payload })}\n\n`);
   };
 
   const base = makeResponseObject({ id: respId, model, status: "in_progress", output: [], usage: null });
@@ -605,7 +659,7 @@ async function handleResponses(req, res) {
             error: { code: "upstream_error", message: msg || "stream error" },
           }),
         });
-        res.end();
+        safeEnd(res);
         return;
       }
     }
@@ -616,7 +670,7 @@ async function handleResponses(req, res) {
         error: { code: "upstream_error", message: e.message },
       }),
     });
-    res.end();
+    safeEnd(res);
     return;
   }
 
@@ -643,7 +697,7 @@ async function handleResponses(req, res) {
       incomplete: status === "incomplete" ? { reason: "max_output_tokens" } : null,
     }),
   });
-  res.end();
+  safeEnd(res);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -816,7 +870,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     log("handler error:", e.message);
     if (res.headersSent) {
-      res.end();
+      safeEnd(res);
       return;
     }
     const status = e.status || 502;
@@ -830,20 +884,20 @@ const server = http.createServer(async (req, res) => {
 
 server.on("error", (e) => {
   if (e.code === "EADDRINUSE") {
-    console.error(`[gateway] 端口 ${PORT} 已被占用`);
+    logError(`端口 ${PORT} 已被占用`);
   } else {
-    console.error(`[gateway] ${e.message}`);
+    logError(e.message);
   }
   process.exit(1);
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`[gateway] listening on http://${HOST}:${PORT}`);
-  console.log(`[gateway]   POST /v1/chat/completions   (OpenAI)`);
-  console.log(`[gateway]   POST /v1/messages           (Anthropic)`);
-  console.log(`[gateway]   POST /v1/responses          (Responses)`);
-  console.log(`[gateway]   GET  /v1/models`);
-  console.log(`[gateway]   GET  /user/balance`);
-  console.log(`[gateway]   GET  /user/quota`);
-  console.log(`[gateway] upstream: ${API_BASE}`);
+  log(`listening on http://${HOST}:${PORT}`);
+  log("  POST /v1/chat/completions   (OpenAI)");
+  log("  POST /v1/messages           (Anthropic)");
+  log("  POST /v1/responses          (Responses)");
+  log("  GET  /v1/models");
+  log("  GET  /user/balance");
+  log("  GET  /user/quota");
+  log("upstream: " + API_BASE);
 });
