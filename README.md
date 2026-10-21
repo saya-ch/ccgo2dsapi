@@ -85,6 +85,8 @@ API Key 填 `proxy-managed`（哨兵值，代理替换成 `auth.json` 里的真�
 
 模型名可写 `deepseek-v4-flash`、`deepseek-v4.1-flash` 或 `deepseek-flash`。按官方文档，`deepseek-flash` 指向 **V4.1-Flash**，本项目对齐这一语义；`deepseek-v4-flash` 与 `deepseek-v4.1-flash` 是上游两个独立模型，各自可直接调用。`/v1/models` 会列出全部可用模型及上下文窗口。
 
+**图片输入**：`deepseek-v4.1-flash`、`deepseek-v4.1-flash-fast`、`deepseek-v4-flash-vision-exp` 支持，`deepseek-v4-flash` 与 `deepseek-v4-pro` 看不到图（会回「没有图片」）。三套协议都能传图，Base64 data URL 与 http(s) 链接均可。
+
 ## 客户端
 
 官方为 8 个 Agent 提供了接入指南。本项目不重写这些配置——按官方文档配好，

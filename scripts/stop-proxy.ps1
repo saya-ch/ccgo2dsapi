@@ -23,31 +23,42 @@ $pkgName = if ($cfg -and $cfg.ProxyPackage) { $cfg.ProxyPackage } else { "comman
 $pidFile = Join-Path $root "proxy.pid"
 
 if (-not (Test-Path $pidFile)) {
-  Write-Host "没有 $pidFile —— 代理大概不是用 start-proxy.ps1 -Hidden 启动的。"
+  # 没有 pid 文件时按端口兜底：用 /health 自报的版本确认归属，再停掉
   $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-  if ($conn) {
-    Write-Host "端口 $Port 当前被 PID $(($conn | Select-Object -First 1).OwningProcess) 占用，请自行确认后处理。"
+  if (-not $conn) {
+    Write-Host "端口 $Port 没有监听，代理应该已经停了。"
+  } else {
+    $pidFromPort = ($conn | Select-Object -First 1).OwningProcess
+    $procFromPort = Get-CimInstance Win32_Process -Filter "ProcessId = $pidFromPort" -ErrorAction SilentlyContinue
+    $looksOurs = $procFromPort -and $procFromPort.CommandLine -match [regex]::Escape($pkgName)
+    try {
+      $h = Invoke-RestMethod "http://${HostAddress}:${Port}/health" -TimeoutSec 2
+      if (-not $h -or -not $h.version) { $looksOurs = $false }
+    } catch { $looksOurs = $false }
+    if ($looksOurs) {
+      Stop-Process -Id $pidFromPort -Force
+      Write-Host "已按端口停止代理（PID $pidFromPort）。"
+    } else {
+      Write-Host "端口 $Port 被 PID $pidFromPort 占用，但不是本代理，未处理。"
+    }
   }
-  return
+} else {
+  $proxyPid = (Get-Content $pidFile -Raw).Trim()
+  $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $proxyPid" -ErrorAction SilentlyContinue
+  if (-not $proc) {
+    Write-Host "PID $proxyPid 已不存在，清理 pid 文件。"
+    Remove-Item $pidFile -Force
+  } elseif ($proc.CommandLine -notmatch [regex]::Escape($pkgName)) {
+    Write-Host "PID $proxyPid 不是本代理进程，拒绝操作：$($proc.CommandLine)"
+    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+  } else {
+    Stop-Process -Id $proxyPid -Force
+    Remove-Item $pidFile -Force
+    Write-Host "已停止代理（PID $proxyPid）。"
+  }
 }
 
-$proxyPid = (Get-Content $pidFile -Raw).Trim()
-$proc = Get-CimInstance Win32_Process -Filter "ProcessId = $proxyPid" -ErrorAction SilentlyContinue
 
-if (-not $proc) {
-  Write-Host "PID $proxyPid 已不存在，清理 pid 文件。"
-  Remove-Item $pidFile -Force
-  return
-}
-
-if ($proc.CommandLine -notmatch [regex]::Escape($pkgName)) {
-  Write-Host "PID $proxyPid 不是本代理进程，拒绝操作：$($proc.CommandLine)"
-  return
-}
-
-Stop-Process -Id $proxyPid -Force
-Remove-Item $pidFile -Force
-Write-Host "已停止代理（PID $proxyPid）。"
 
 # Responses 适配层是独立进程，一并停掉，避免只剩它在监听
 $rsPort = if ($cfg -and $cfg.Responses -and $cfg.Responses.Port) { [int]$cfg.Responses.Port } else { 8788 }

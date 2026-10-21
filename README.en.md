@@ -85,6 +85,8 @@ Use `proxy-managed` as the API key — it is a sentinel the proxy swaps for the 
 
 Model names may be written as `deepseek-v4-flash`, `deepseek-v4.1-flash` or `deepseek-flash`. Per the official docs `deepseek-flash` means **V4.1-Flash**, and this project matches that; `deepseek-v4-flash` and `deepseek-v4.1-flash` are two distinct upstream models, each callable directly. `/v1/models` lists everything available with its context window.
 
+**Image input** is available on `deepseek-v4.1-flash`, `deepseek-v4.1-flash-fast` and `deepseek-v4-flash-vision-exp`. `deepseek-v4-flash` and `deepseek-v4-pro` do not see images and answer that none was attached. All three protocols accept images, as either a base64 data URL or an http(s) link.
+
 ## Clients
 
 DeepSeek publishes setup guides for eight agents. This project does not restate them — configure per the official guide, then change only the base URL; behaviour is identical.

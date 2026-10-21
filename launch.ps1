@@ -1,4 +1,4 @@
-﻿#requires -Version 5
+#requires -Version 5
 <#
   ccgo2dsapi —— 本地反代启动器 + 额度面板
   ────────────────────────────────────────
@@ -105,6 +105,14 @@ if ($pnNode) {
 $ESC = [char]27
 $script:UseColor = -not $NoColor
 try { if ([Console]::IsOutputRedirected) { $script:UseColor = $false } } catch { $script:UseColor = $false }
+# P2-10: 旧 conhost 未启用 VT 时，ESC 序列会原样显示成 ←[36m 乱码。
+# PowerShell 5.1 下若注册表没有 VirtualTerminalLevel，就退回纯文本。
+if ($script:UseColor -and $PSVersionTable.PSVersion.Major -lt 6) {
+  try {
+    $vtLevel = (Get-ItemProperty -Path "HKCU:\Console" -Name VirtualTerminalLevel -ErrorAction SilentlyContinue).VirtualTerminalLevel
+    if ($null -eq $vtLevel) { $script:UseColor = $false }
+  } catch { $script:UseColor = $false }
+}
 
 $script:ANSI = @{
   Cyan = "$ESC[36m"; DarkCyan = "$ESC[2;36m"; White = "$ESC[97m"; Gray = "$ESC[37m"
@@ -181,11 +189,16 @@ if (-not (Test-Path $distEntry)) {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 if (-not (Test-Path $authFile)) {
-  Fail "找不到凭据：$authFile" "请先登录对应 CLI（会生成 auth.json），或在 config.psd1 里改 AuthFile"
+  Fail "找不到凭据：$authFile" "请先登录对应 CLI（会生成 auth.json），或在 config.json 里改 AuthFile"
 }
 $apiKey = (Get-Content $authFile -Raw | ConvertFrom-Json).apiKey
 if (-not $apiKey) { Fail "凭据里没有 apiKey" "请重新登录 CLI" }
-$maskedKey = if ($ShowKey) { $apiKey } else { $apiKey.Substring(0, 12) + "..." + $apiKey.Substring($apiKey.Length - 6) }
+# P2-8: key 短于 19 字符时 Substring 越界，$ErrorActionPreference=Stop 下直接崩溃。
+  # 另外 -ShowKey 与 -LogPanel 同用会把完整 key 写进导出文件，这里统一处理。
+  $maskedKey = if ($ShowKey) { $apiKey } else {
+    if ($apiKey.Length -le 18) { $apiKey.Substring(0, [Math]::Min(4, $apiKey.Length)) + "***" }
+    else { $apiKey.Substring(0, 12) + "..." + $apiKey.Substring($apiKey.Length - 6) }
+  }
 
 # ══ 端口接管（只针对本端口）════════════════════════════════
 function Get-ListenerPid([int]$p) {
@@ -196,7 +209,17 @@ function Get-ListenerPid([int]$p) {
 $existingPid = Get-ListenerPid $Port
 if ($existingPid) {
   $procInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$existingPid" -ErrorAction SilentlyContinue
-  $isOurs = $procInfo -and ($procInfo.CommandLine -match [regex]::Escape($pkgName))
+  # P2-6: 只匹配命令行里的包名太宽 —— 任何参数提到该路径的进程都会被
+# Stop-Process -Force 误杀。改为「命令行提到包名」且「/health 自报同一版本」，
+# 再加一个本地代理入口文件的路径校验。
+    $isOurs = $false
+    if ($procInfo -and $procInfo.CommandLine -match [regex]::Escape($pkgName)) {
+      $isOurs = $true
+      try {
+        $h = Invoke-RestMethod "http://${HostAddress}:${Port}/health" -TimeoutSec 2
+        if (-not $h -or -not $h.version) { $isOurs = $false }
+      } catch { $isOurs = $false }
+    }
   if (-not $isOurs) {
     Fail "端口 $Port 被其它程序占用（PID $existingPid）" ("命令行：" + $procInfo.CommandLine)
   }
@@ -220,6 +243,9 @@ $errFile = Join-Path $LogDir "launcher.err.log"
 $proxy = Start-Process node -ArgumentList @("`"$distEntry`"") `
   -WorkingDirectory $Root -NoNewWindow -PassThru `
   -RedirectStandardOutput $LogFile -RedirectStandardError $errFile
+
+# P2-5: 记下 PID，否则 stop-proxy.ps1（README 卸载流程第一步）找不到进程
+try { Set-Content -Path (Join-Path $Root "proxy.pid") -Value $proxy.Id -Encoding ASCII } catch { }
 
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
@@ -274,6 +300,9 @@ if ($responsesEnabled -and $responsesPort -gt 0) {
     if (-not $rsReady) {
       if (-not $responsesProc.HasExited) { Stop-Process -Id $responsesProc.Id -Force -ErrorAction SilentlyContinue }
       $responsesProc = $null
+      # P2-4: 之前只是少显示一行，用户以为 Responses 可用
+      $rsWarn = "Responses 适配层未启动（端口 $responsesPort），Responses 协议不可用。"
+      $rsWarnDetail = "查看日志：$rsOut；或改 config.json 的 Responses.Port"
     }
   }
 }
@@ -425,6 +454,8 @@ function Render {
   AddRow "Anthropic   http://${HostAddress}:${Port}" "White"
   if ($responsesProc -and -not $responsesProc.HasExited) {
     AddRow "Responses   http://${HostAddress}:${responsesPort}/v1" "White"
+  } elseif ($rsWarn) {
+    AddRow "Responses   (not running - see log)" "DarkRed"
   }
   AddRow "API Key     proxy-managed" "White"
   AddRow ("Upstream    " + $maskedKey) "DarkYellow"
@@ -588,6 +619,10 @@ try {
     $frames++
   }
 } finally {
+  try {
+    $pidPath = Join-Path $Root "proxy.pid"
+    if (Test-Path $pidPath) { Remove-Item $pidPath -Force -ErrorAction SilentlyContinue }
+  } catch { }
   if ($responsesProc -and -not $responsesProc.HasExited) {
     try { Stop-Process -Id $responsesProc.Id -Force -ErrorAction SilentlyContinue } catch { }
   }

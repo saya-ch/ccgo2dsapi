@@ -29,6 +29,9 @@ const PORT = Number(argOf("--port", "8788"));
 const HOST = argOf("--host", "127.0.0.1");
 const UPSTREAM = argOf("--upstream", "http://127.0.0.1:8787");
 const API_KEY = argOf("--key", "proxy-managed");
+// 上游首字延迟可能达数分钟，但不应无限等待（P2-1）
+const UPSTREAM_TIMEOUT_MS = Number(argOf("--timeout", "600000"));
+const ALLOW_CORS = args.includes("--cors");
 
 function log(msg, extra) {
   const line = `[responses] ${msg}`;
@@ -143,15 +146,25 @@ async function handleNonStream(body, res) {
   const respId = newResponseId();
 
   let upstreamRes;
+  // 上游挂起会永久占用连接；客户端断开也应立即释放（P2-1）
+  const ac = new AbortController();
+  const onClose = () => ac.abort();
+  res.on("close", onClose);
+  const timer = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
   try {
     upstreamRes = await fetch(UPSTREAM + "/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
       body: JSON.stringify(chatReq),
+      signal: ac.signal,
     });
   } catch (e) {
+    clearTimeout(timer);
+    res.off("close", onClose);
     return sendError(res, 502, "upstream_unreachable", e.message);
   }
+  clearTimeout(timer);
+  res.off("close", onClose);
 
   const text = await upstreamRes.text();
   if (!upstreamRes.ok) {
@@ -248,13 +261,22 @@ async function handleStream(body, res) {
   emit("response.in_progress", { response: { ...baseObj } });
 
   let upstreamRes;
+  // 流式：abort 需覆盖整个读取阶段，客户端断开时立即中止（P2-1）
+  const acStream = new AbortController();
+  const onCloseStream = () => acStream.abort();
+  res.on("close", onCloseStream);
+  const streamTimer = setTimeout(() => acStream.abort(), UPSTREAM_TIMEOUT_MS);
   try {
     upstreamRes = await fetch(UPSTREAM + "/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
       body: JSON.stringify(chatReq),
+      signal: acStream.signal,
     });
+    clearTimeout(streamTimer);
   } catch (e) {
+    clearTimeout(streamTimer);
+    res.off("close", onCloseStream);
     emit("response.failed", {
       response: makeResponseObj({
         id: respId, model: body.model, status: "failed", output: [],
@@ -436,12 +458,30 @@ async function handleStream(body, res) {
     });
   }
 
-  // 汇总 output
-  if (reasoningItem) outputItems.push({ id: reasoningItem.id, type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: reasoningText }] });
-  if (messageItem) outputItems.push({ id: messageItem.id, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: messageText, annotations: [] }] });
-  for (const st of toolItems.values()) {
-    outputItems.push({ id: st.itemId, type: "function_call", call_id: st.callId, name: st.name, arguments: st.args, status: "completed" });
+  // 汇总 output。必须按 __idx 排序：这些 item 的创建顺序与
+  // reasoning→message→tools 这个书写顺序并不一致（工具可能先冒出来），
+  // 直接 push 会让 output[] 的下标和 output_index 对不上。
+  const collected = [];
+  if (reasoningItem) {
+    collected.push({
+      __idx: reasoningItem.__idx,
+      item: { id: reasoningItem.id, type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: reasoningText }] },
+    });
   }
+  if (messageItem) {
+    collected.push({
+      __idx: messageItem.__idx,
+      item: { id: messageItem.id, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: messageText, annotations: [] }] },
+    });
+  }
+  for (const st of toolItems.values()) {
+    collected.push({
+      __idx: st.index,
+      item: { id: st.itemId, type: "function_call", call_id: st.callId, name: st.name, arguments: st.args, status: "completed" },
+    });
+  }
+  collected.sort((a, b) => a.__idx - b.__idx);
+  outputItems.push(...collected.map((c) => c.item));
 
   const status = finishReason === "length" ? "incomplete" : "completed";
   const finalObj = makeResponseObj({
@@ -460,6 +500,7 @@ async function handleStream(body, res) {
   });
 
   emit(status === "incomplete" ? "response.incomplete" : "response.completed", { response: finalObj });
+  res.off("close", onCloseStream);
   res.end();
 }
 
@@ -473,12 +514,25 @@ function sendError(res, status, code, message) {
   sendJson(res, status, { error: { message, type: "invalid_request_error", param: null, code } });
 }
 
+// P2-2: 逐块累加字符串且无上限时，一张 base64 图片就能打爆内存。
+// 与官方 48 MiB 请求体上限对齐。
+const MAX_BODY_BYTES = 48 * 1024 * 1024;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let d = "";
-    req.on("data", (c) => (d += c));
+    let size = 0;
+    const chunks = [];
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(Object.assign(new Error("request body too large"), { status: 413 }));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
-      try { resolve(JSON.parse(d || "{}")); } catch (e) { reject(e); }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")); } catch (e) { reject(e); }
     });
     req.on("error", reject);
   });
@@ -486,8 +540,12 @@ function readBody(req) {
 
 // ── 路由 ──────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // P2-9: 默认不放开跨域。绑定 127.0.0.1 只能挡住外部主机，
+  // 本机任意网页仍可 POST 到这里消耗额度；上游按设备指纹绑定账号，
+  // 盗刷无法归因、记在账号主头上。需要跨域时用 --cors 显式放开。
+  if (ALLOW_CORS) res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") {
+    if (!ALLOW_CORS) return res.writeHead(405).end();
     res.writeHead(204, {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "*",
@@ -509,7 +567,8 @@ const server = http.createServer(async (req, res) => {
     let body;
     try {
       body = await readBody(req);
-    } catch {
+    } catch (e) {
+      if (e.status === 413) return sendError(res, 413, "payload_too_large", "request body exceeds 48 MiB");
       return sendError(res, 400, "invalid_json", "Request body is not valid JSON");
     }
     // 官方：input 与 instructions 至少传一个
@@ -528,6 +587,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   sendError(res, 404, "not_found", `No route for ${req.method} ${url}`);
+});
+
+// P2-3: 端口被占时不要抛未捕获异常，给出可读信息后退出
+server.on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    console.error(`[responses] 端口 ${PORT} 已被占用，Responses 适配层未启动`);
+    console.error(`[responses] 换端口：--port <n>，或在 config.json 改 Responses.Port`);
+  } else {
+    console.error(`[responses] server error: ${e.message}`);
+  }
+  process.exit(1);
 });
 
 server.listen(PORT, HOST, () => {
