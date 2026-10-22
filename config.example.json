@@ -21,7 +21,7 @@
     "TpsGood": 250,
     "TpsLow": 120
   },
-  "_comment_plan": "月额度总额按 planId 映射（服务端不下发总额）。Go 套餐为 $10。",
+  "_comment_plan": "月额度总额按 planId 映射（服务端不下发总额）。Go 套餐为 $10。本项目只对 Go 套餐有意义 —— GOAT 及以上有官方 API，不需要中转。",
   "PlanCredits": {
     "individual-go": 10,
     "individual-go-v1": 10

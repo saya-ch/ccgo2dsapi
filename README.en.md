@@ -58,6 +58,24 @@ The Go plan only exposes `/alpha/generate` to the official CLI; it has no standa
 
 This is not an official channel. Usage caps, model availability and stability are controlled by Command Code, not DeepSeek, and can change without notice. It suits personal development and experimentation, not production dependencies.
 
+## This only applies to the Go plan
+
+Command Code's own documentation is explicit: **every plan except Go has API access.**
+
+> Every plan except the Go plan has API access.
+> Point any OpenAI or Anthropic compatible client at `https://api.commandcode.ai/provider/v1`
+
+| Plan | Official API | Do you need this project? |
+|---|---|---|
+| **Go** ($1/month) | none | **yes** |
+| GOAT ($10/month, $80 of credits) | yes | no |
+| Pro / Max / Ultra | yes | no |
+
+On GOAT or above, point your client at `https://api.commandcode.ai/provider/v1` with
+the key you already have. No translation layer, no local process. This project exists
+for one reason: Go exposes a private endpoint to the official CLI only and offers no
+standard API.
+
 ## Quick start
 
 Requires Windows 10/11, PowerShell 5.1+, Node.js 24+.

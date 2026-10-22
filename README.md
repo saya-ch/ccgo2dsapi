@@ -58,6 +58,23 @@ Go 套餐本身只对官方 CLI 开放 `/alpha/generate`，不提供标准 API�
 
 这不是官方渠道，用量上限、模型可用范围、服务稳定性都取决于 Command Code 而非 DeepSeek，也可能随时变化。它适合个人开发与试验，不适合当作生产依赖。
 
+## 只对 Go 套餐有意义
+
+Command Code 官方文档写明：**除了 Go 套餐，其它套餐都有 API 访问权。**
+
+> Every plan except the Go plan has API access.
+> Point any OpenAI or Anthropic compatible client at `https://api.commandcode.ai/provider/v1`
+
+| 套餐 | 官方 API | 是否需要本项目 |
+|---|---|---|
+| **Go**（$1/月） | 无 | **需要** |
+| GOAT（$10/月，$80 额度） | 有 | 不需要 |
+| Pro / Max / Ultra | 有 | 不需要 |
+
+如果你在用 GOAT 或更高套餐，直接把它们给的 Key 和 `https://api.commandcode.ai/provider/v1`
+填进客户端即可，没有转译损耗，也不需要本地进程。本项目存在的唯一理由，是 Go 套餐
+只对官方 CLI 开放私有端点、不提供标准 API。
+
 ## 快速开始
 
 需要 Windows 10/11、PowerShell 5.1+、Node.js 24+。

@@ -1,8 +1,8 @@
 # 官方 CLI 上游协议逆向报告
 
 - 目标：`%APPDATA%\npm\node_modules\command-code\dist\cli.mjs`（`npm i -g command-code` 后本机路径）
-- 版本：`command-code@1.50.0`
-- 方法：静态提取（发布产物，2.49 MB，压缩但未混淆，`__name` 标记保留原函数名）
+- 版本：`command-code@1.87.1`（2026-10-22 复核；此前基于 1.50.0）
+- 方法：静态提取（发布产物，3.34 MB，压缩但未混淆，`__name` 标记保留原函数名）
 - 性质：**观察**（源码字面量）/ 推断 / 未知，逐条标注
 
 ---
@@ -44,9 +44,58 @@ POST /alpha/share/append         分享
 ```
 x-oauth-token  x-oauth-provider  x-project-slug
 x-taste-learning  x-cli-environment  x-command-code-version
-x-oss-primary-provider  x-session-id  x-cmd-zdr
+x-cli-surface  x-oss-primary-provider  x-session-id  x-cmd-zdr
 x-cmd-provider-deepseek-internal
 ```
+
+另有 `x-api-key`（Anthropic 风格鉴权）、`x-opencode-session`（OpenCode 集成）。
+
+### 1.87.1 相对 1.50.0 的变化
+
+复核结论：**协议主体未变**，请求体结构、`User-Agent: cli`、默认 `max_tokens: 64000`、
+流式事件类型全部一致。新增三处：
+
+| 变化 | 内容 | 本项目处理 |
+|---|---|---|
+| `x-cli-surface` 头 | 新增，取值 `cli` / `ide` / `desktop` 等 | **已实现**（`buildHeaders` 支持 `cliSurface`） |
+| `/alpha/fingerprint/record` | 设备指纹上报，见下 | 不实现，风险已记录 |
+| `/alpha/agent/generate` | Agent 定义生成，与协议网关无关 | 不适用 |
+
+新增端点全量（1.87.1）：
+
+```
+/alpha/generate              推理（本项目使用）
+/alpha/agent/generate        Agent 定义生成
+/alpha/whoami                身份
+/alpha/billing/credits       额度窗口
+/alpha/billing/subscriptions 套餐
+/alpha/usage/summary         用量汇总
+/alpha/fingerprint/record    设备指纹上报
+/alpha/sandbox/*             沙箱会话（start/stop/status/stream/input/...）
+/alpha/web-search, web-fetch 服务端工具
+/alpha/taste/*, /beta/taste/* 风格数据
+/provider/v1/systemone       Provider API（GOAT 及以上套餐用）
+```
+
+### 设备指纹上报（1.87.1 新增，与本项目相关）
+
+`recordCliFingerprint` 采集以下信号，哈希成 `thumbmark` 后 POST 到
+`/alpha/fingerprint/record`，并带 `Authorization: Bearer <key>`：
+
+```
+readMachineId      机器码
+readMacAddresses   MAC 地址
+readGitEmail       git 配置里的邮箱
+detectContainer    是否在容器内
+readTimezone       时区
+```
+
+命名空间 `command-code:device-fingerprint:v1`，每个进程只上报一次（内部 `aP` 标志），
+且受 `isTelemetryEnabled()` 控制。
+
+**对本项目的影响**：官方 CLI 会主动上报设备指纹，这解释了上游为什么能按设备绑定账号。
+本项目**不上报**（不采集这些信号），但需要用户知道：上游的风控依据之一就是这套指纹，
+所以「同一密钥多机使用」比单机更容易触发限制。
 
 ### 与 npm 代理包的差异（重要）
 | 头 | 代理包 | 官方 CLI |

@@ -29,6 +29,7 @@ export const H = {
   TASTE_LEARNING: "x-taste-learning",
   CLI_ENVIRONMENT: "x-cli-environment",
   CLI_VERSION: "x-command-code-version",
+  CLI_SURFACE: "x-cli-surface",
   OSS_PRIMARY_PROVIDER: "x-oss-primary-provider",
   SESSION_ID: "x-session-id",
   CMD_ZDR: "x-cmd-zdr",
@@ -64,6 +65,8 @@ export function buildHeaders(o = {}) {
   if (o.authKey) h.Authorization = `Bearer ${o.authKey}`;
   if (o.traceId && o.spanId) h.traceparent = `00-${o.traceId}-${o.spanId}-01`;
   h["User-Agent"] = "cli"; // 官方 wy = "cli"
+  // 1.87.1 新增：cli surface 标识（cli / ide / desktop 等）
+  if (o.cliSurface) h[H.CLI_SURFACE] = o.cliSurface;
   if (o.cliVersion) h[H.CLI_VERSION] = o.cliVersion;
   if (o.sessionId) h[H.SESSION_ID] = o.sessionId;
   if (o.zdr) h[H.CMD_ZDR] = "1";
