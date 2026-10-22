@@ -9,6 +9,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   buildHeaders, buildGenerateBody,
@@ -40,6 +41,20 @@ const HOST = argOf("--host", "127.0.0.1");
 const API_BASE = argOf("--base", "https://api.commandcode.ai");
 const AUTH_FILE = argOf("--auth", path.join(os.homedir(), ".commandcode", "auth.json"));
 const CLI_VERSION = argOf("--cli-version", "1.50.0");
+
+// 网关自身版本：从 package.json 读，避免和 /health 的硬编码漂移。
+// 之前 /health 写死 "1.0.0"，package.json 升到 1.1.0 后面板仍显示 v1.0.0。
+const GATEWAY_VERSION = (() => {
+  try {
+    // 用 fileURLToPath 而不是手撕 URL —— Windows 盘符与 URL 编码都容易出错
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkgPath = path.resolve(here, "..", "package.json");
+    const v = JSON.parse(fs.readFileSync(pkgPath, "utf8")).version;
+    return v || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 const API_KEY_SENTINEL = argOf("--sentinel", "proxy-managed");
 
 /**
@@ -1195,7 +1210,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === "GET" && (url === "/health" || url === "/v1/health")) {
-      return sendJson(res, 200, { status: "ok", version: "1.0.0", endpoints: ["/v1/chat/completions", "/v1/messages", "/v1/models"] });
+      return sendJson(res, 200, { status: "ok", version: GATEWAY_VERSION, endpoints: ["/v1/chat/completions", "/v1/messages", "/v1/models"] });
     }
     if (req.method === "GET" && url === "/v1/models") return handleModels(res);
     if (req.method === "GET" && (url === "/user/balance" || url === "/v1/user/balance")) return await handleBalance(res);
