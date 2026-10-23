@@ -600,23 +600,31 @@ async function handleOpenAI(req, res) {
       }
     }
   } catch (e) {
-    // A1: 流在收到 finish 之前结束 = 上游截断，不能当成功
     failed = true;
-    emit({
-      ...openAIError(
-        sawFinish || sawAbort ? e.message : "upstream stream truncated before completion",
-        "upstream_error"
-      ),
-      id, object: "chat.completion.chunk", created, model, choices: [],
-    });
+    // 客户端主动断开导致的停止不算上游错误 —— 用户切会话、点继续时很常见。
+    // 报「截断」会让他以为会话失败，而实际上是他自己切走的。
+    const clientGone = res.writableEnded || res.destroyed;
+    if (!clientGone) {
+      emit({
+        ...openAIError(
+          sawFinish || sawAbort ? e.message : "upstream stream truncated before completion",
+          "upstream_error"
+        ),
+        id, object: "chat.completion.chunk", created, model, choices: [],
+      });
+    }
   }
 
   // A1: 既没 finish 也没 abort，说明流被截断
   if (!failed && !sawFinish && !sawAbort) {
-    emit({
-      ...openAIError("upstream stream truncated before completion", "upstream_error"),
-      id, object: "chat.completion.chunk", created, model, choices: [],
-    });
+    // 区分谁先断的：客户端先走是正常中止；上游先走才是真截断。
+    const clientGone = res.writableEnded || res.destroyed;
+    if (!clientGone) {
+      emit({
+        ...openAIError("upstream stream truncated before completion", "upstream_error"),
+        id, object: "chat.completion.chunk", created, model, choices: [],
+      });
+    }
     safeEnd(res);
     return;
   }
@@ -761,16 +769,23 @@ async function handleAnthropic(req, res) {
   } catch (e) {
     failed = true;
     closeBlock();
-    const msg = sawFinish || sawAbort
-      ? e.message
-      : "upstream stream truncated before completion";
-    emit("error", anthropicError(msg, "api_error"));
+    // 客户端主动断开不算上游错误，见 OpenAI 路径同样的处理
+    const clientGone = res.writableEnded || res.destroyed;
+    if (!clientGone) {
+      const msg = sawFinish || sawAbort
+        ? e.message
+        : "upstream stream truncated before completion";
+      emit("error", anthropicError(msg, "api_error"));
+    }
   }
 
-  // A1: 没有 finish 也没有 abort = 上游截断，不能静默当作正常结束
+  // 没有 finish 也没有 abort 时区分谁先断：客户端先走是正常中止
   if (!failed && !sawFinish && !sawAbort) {
     closeBlock();
-    emit("error", anthropicError("upstream stream truncated before completion", "api_error"));
+    const clientGone = res.writableEnded || res.destroyed;
+    if (!clientGone) {
+      emit("error", anthropicError("upstream stream truncated before completion", "api_error"));
+    }
   }
   safeEnd(res);
   abortCh?.cleanup();
@@ -981,12 +996,16 @@ async function handleResponses(req, res) {
       }
     }
   } catch (e) {
-    emit("response.failed", {
-      response: makeResponseObject({
-        id: respId, model, status: "failed", output: [],
-        error: { code: "upstream_error", message: e.message },
-      }),
-    });
+    // 客户端主动断开不算上游错误；否则用户切会话时会看到 response.failed
+    const clientGone = res.writableEnded || res.destroyed;
+    if (!clientGone) {
+      emit("response.failed", {
+        response: makeResponseObject({
+          id: respId, model, status: "failed", output: [],
+          error: { code: "upstream_error", message: e.message },
+        }),
+      });
+    }
     safeEnd(res);
     return;
   }
