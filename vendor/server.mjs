@@ -112,7 +112,8 @@ const REQ_LOG_FILE = (() => {
   const v = argOf("--request-log", "");
   if (v === "off" || v === "false") return null;
   if (v) return v;
-  return null; // 默认关闭，避免无意间写出大文件
+  // 默认开启：断流问题没有请求日志无法定位。--request-log off 可关。
+  return path.join(os.homedir(), ".commandcode", "ccgo2dsapi-requests.log");
 })();
 
 let reqLogStream = null;
@@ -140,6 +141,8 @@ function logRequest(o) {
     reasoning: o.reasoning ?? null,
     ttft_ms: o.ttftMs ?? null,
     ms: o.ms ?? null,
+    // 收尾状态：ok / truncated / upstream_error / client_gone / timeout
+    end: o.end ?? null,
     ...(o.error ? { error: String(o.error).slice(0, 200) } : {}),
   };
   try { reqLogStream.write(JSON.stringify(rec) + "\n"); } catch { }
@@ -467,6 +470,34 @@ async function refreshModelMeta() {
 // ══════════════════════════════════════════════════════════
 // OpenAI Chat Completions
 // ══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
+// 流错误描述
+// ══════════════════════════════════════════════════════════
+/**
+ * 把流式过程中的异常翻译成对用户有用的话。
+ *
+ * 关键原则：不要用固定文案盖掉真实原因。之前把 idle 超时统一写成
+ * "upstream stream truncated"，结果日志和界面都看不出是超时，
+ * 排查方向完全跑偏。
+ */
+function describeStreamError(e, sawFinish, sawAbort) {
+  const raw = String(e?.message || e || "unknown").trim();
+
+  // 超时类：明确说是等待超时，并给出可调参数
+  if (/idle for|sent no data for/i.test(raw)) {
+    return `upstream timed out: ${raw}`;
+  }
+  if (/timeout|timed out|aborted/i.test(raw) && !/truncated/i.test(raw)) {
+    return `upstream timeout: ${raw}`;
+  }
+
+  // 已经收到 finish/abort 才出错：是收尾阶段的问题，如实转述
+  if (sawFinish || sawAbort) return raw;
+
+  // 真的在没有任何终止事件的情况下结束：这才叫截断
+  return `upstream stream truncated before completion (${raw})`;
+}
+
 async function handleOpenAI(req, res) {
   const body = await readBody(req);
   const t = openAIToWire(body);
@@ -505,6 +536,7 @@ async function handleOpenAI(req, res) {
     const message = wireToOpenAIMessage(r.content);
     logRequest({
       protocol: "openai", model, stream: false, status: 200,
+      end: "ok",
       in: r.usage?.inputTokens, out: r.usage?.outputTokens,
       reasoning: r.usage?.reasoningTokens, ms: Date.now() - t0,
     });
@@ -584,6 +616,7 @@ async function handleOpenAI(req, res) {
         }
         logRequest({
           protocol: "openai", model, stream: true, status: 200,
+          end: "ok",
           in: u?.inputTokens, out: u?.outputTokens,
           reasoning: u?.outputTokenDetails?.reasoningTokens ?? u?.reasoningTokens,
           ms: Date.now() - t0,
@@ -607,7 +640,9 @@ async function handleOpenAI(req, res) {
     if (!clientGone) {
       emit({
         ...openAIError(
-          sawFinish || sawAbort ? e.message : "upstream stream truncated before completion",
+          // 不要再把真实错误改写成固定文案 —— 上一版把 idle 超时写成
+          // "truncated"，导致日志里看不出真实原因，排查方向全错。
+          describeStreamError(e, sawFinish, sawAbort),
           "upstream_error"
         ),
         id, object: "chat.completion.chunk", created, model, choices: [],
@@ -670,6 +705,7 @@ async function handleAnthropic(req, res) {
     const r = await consumeStream(upstream.body);
     logRequest({
       protocol: "anthropic", model, stream: false, status: 200,
+      end: "ok",
       in: r.usage?.inputTokens, out: r.usage?.outputTokens,
       reasoning: r.usage?.reasoningTokens, ms: Date.now() - t0,
     });
@@ -772,9 +808,7 @@ async function handleAnthropic(req, res) {
     // 客户端主动断开不算上游错误，见 OpenAI 路径同样的处理
     const clientGone = res.writableEnded || res.destroyed;
     if (!clientGone) {
-      const msg = sawFinish || sawAbort
-        ? e.message
-        : "upstream stream truncated before completion";
+      const msg = describeStreamError(e, sawFinish, sawAbort);
       emit("error", anthropicError(msg, "api_error"));
     }
   }
@@ -834,6 +868,7 @@ async function handleResponses(req, res) {
     const status = r.stopReason === "max_tokens" ? "incomplete" : "completed";
     logRequest({
       protocol: "responses", model, stream: false, status: 200,
+      end: "ok",
       in: r.usage?.inputTokens, out: r.usage?.outputTokens,
       reasoning: r.usage?.reasoningTokens, ms: Date.now() - t0,
     });
@@ -1039,6 +1074,11 @@ async function handleResponses(req, res) {
 // ══════════════════════════════════════════════════════════
 // 直通事件解析（避免重复 JSON.parse）
 // ══════════════════════════════════════════════════════════
+// 两段超时要分开：
+//   FIRST_EVENT_MS —— 从发出请求到第一个事件。上游要先处理整个上下文，
+//     1M token 的会话等几分钟很正常，用 idle 阈值去卡它必然误杀。
+//   IDLE_TIMEOUT_MS —— 已经收到过事件之后的间隔。这时才真的说明上游卡住了。
+const FIRST_EVENT_MS = Number(argOf("--first-event-timeout", "600000"));
 const IDLE_TIMEOUT_MS = Number(argOf("--idle-timeout", "180000"));
 
 /**
@@ -1051,16 +1091,23 @@ const IDLE_TIMEOUT_MS = Number(argOf("--idle-timeout", "180000"));
 async function* readEvents(stream) {
   const decoder = new TextDecoder();
   let buf = "";
+  let gotAny = false;
   const iterator = stream[Symbol.asyncIterator]();
   while (true) {
     const nextPromise = iterator.next();
+    // 首事件和后续事件的容忍度不同：首事件要等上游处理完整个上下文，
+    // 后续事件之间才该用较短的 idle 阈值。
+    const limit = gotAny ? IDLE_TIMEOUT_MS : FIRST_EVENT_MS;
     let timer;
     const timeout = new Promise((_, rej) => {
       timer = setTimeout(() => {
-        rej(Object.assign(new Error(`upstream idle for ${IDLE_TIMEOUT_MS}ms`), {
-          status: 504, retryable: true, midStream: true,
-        }));
-      }, IDLE_TIMEOUT_MS);
+        rej(Object.assign(
+          new Error(gotAny
+            ? `upstream idle for ${limit}ms after first event`
+            : `upstream sent no data for ${limit}ms`),
+          { status: 504, retryable: true, midStream: gotAny }
+        ));
+      }, limit);
       timer.unref?.();
     });
 
@@ -1075,11 +1122,12 @@ async function* readEvents(stream) {
     }
 
     if (step.done) break;
+    gotAny = true;
     const chunk = step.value;
     buf += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop() ?? "";
-    for (const line of lines) {
+    const parts = buf.split("\n");
+    buf = parts.pop() ?? "";
+    for (const line of parts) {
       const line2 = line.trim();
       if (!line2) continue;
       try { yield JSON.parse(line2); } catch { }
