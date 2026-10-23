@@ -218,11 +218,31 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
   let lastMsg = "";
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    res = await fetchWithTimeout(
-      API_BASE + ROUTE_GENERATE,
-      { method: "POST", headers, body: JSON.stringify(body), signal },
-      TIMEOUT_MS
-    );
+    // fetch 本身也可能抛错（DNS、连接重置、TLS、超时）。
+    // 之前这些异常直接穿透整个重试循环，等于网络抖动立刻失败；
+    // 而且真实原因藏在 error.cause 里，只剩一句 "fetch failed"。
+    try {
+      res = await fetchWithTimeout(
+        API_BASE + ROUTE_GENERATE,
+        { method: "POST", headers, body: JSON.stringify(body), signal },
+        TIMEOUT_MS
+      );
+    } catch (e) {
+      const detail = describeFetchError(e);
+      lastText = detail;
+      lastMsg = detail;
+      const retryable = isRetryableFetchError(e) && attempt < MAX_RETRIES && !signal?.aborted;
+      if (!retryable) {
+        const err = new Error(detail);
+        err.status = 502;
+        err.retryable = false;
+        throw err;
+      }
+      const wait = 400 * Math.pow(2, attempt) + Math.random() * 200;
+      log(`fetch error: ${detail}, retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(wait)}ms`);
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
 
     if (res.ok) break;
 
@@ -498,6 +518,37 @@ function describeStreamError(e, sawFinish, sawAbort) {
   return `upstream stream truncated before completion (${raw})`;
 }
 
+/**
+ * fetch 失败时把真正的原因挖出来。
+ *
+ * Node 的 fetch 把底层故障统一包成 "fetch failed"，真实原因在 error.cause：
+ *   ECONNRESET / ENOTFOUND / UND_ERR_CONNECT_TIMEOUT / UND_ERR_SOCKET ...
+ * 只报 "fetch failed" 等于什么都没说，害我在上游 503 和本地超时之间来回猜。
+ */
+function describeFetchError(e) {
+  const cause = e?.cause;
+  const code = cause?.code || cause?.errno || e?.code;
+  const causeMsg = cause?.message || cause?.syscall;
+  const parts = [];
+  if (code) parts.push(String(code));
+  if (causeMsg) parts.push(String(causeMsg));
+  if (e?.message && e.message !== "fetch failed") parts.push(e.message);
+  const detail = parts.join(": ") || e?.message || "fetch failed";
+  return `fetch failed (${detail})`;
+}
+
+/** 哪些 fetch 层错误值得重试 */
+function isRetryableFetchError(e) {
+  const code = String(e?.cause?.code || e?.code || "");
+  // 连接被重置、超时、临时 DNS 失败 —— 都是瞬时的，重试有意义
+  if (/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|EAI_AGAIN|ENOTFOUND/.test(code)) return true;
+  if (/UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT/.test(code)) return true;
+  if (e?.name === "AbortError" || e?.name === "TimeoutError") return true;
+  const msg = String(e?.message || "");
+  const causeMsg = String(e?.cause?.message || "");
+  return /socket hang up|other side closed|premature close|terminated/i.test(msg + " " + causeMsg);
+}
+
 async function handleOpenAI(req, res) {
   const body = await readBody(req);
   const t = openAIToWire(body);
@@ -625,10 +676,7 @@ async function handleOpenAI(req, res) {
         // A2: 错误后必须立刻停止，且不能再发 [DONE] —— 那等于把失败说成成功
         failed = true;
         const e = typeof ev.error === "string" ? ev.error : ev.error?.message;
-        emit({
-          ...openAIError(e || "stream error", "upstream_error"),
-          id, object: "chat.completion.chunk", created, model, choices: [],
-        });
+        emit(openAIError(e || "stream error", "upstream_error"));
         break;
       }
     }
@@ -638,15 +686,11 @@ async function handleOpenAI(req, res) {
     // 报「截断」会让他以为会话失败，而实际上是他自己切走的。
     const clientGone = res.writableEnded || res.destroyed;
     if (!clientGone) {
-      emit({
-        ...openAIError(
-          // 不要再把真实错误改写成固定文案 —— 上一版把 idle 超时写成
-          // "truncated"，导致日志里看不出真实原因，排查方向全错。
-          describeStreamError(e, sawFinish, sawAbort),
-          "upstream_error"
-        ),
-        id, object: "chat.completion.chunk", created, model, choices: [],
-      });
+      // 保留真实错误原因，别用固定文案覆盖
+      emit(openAIError(
+        describeStreamError(e, sawFinish, sawAbort),
+        "upstream_error"
+      ));
     }
   }
 
@@ -655,10 +699,7 @@ async function handleOpenAI(req, res) {
     // 区分谁先断的：客户端先走是正常中止；上游先走才是真截断。
     const clientGone = res.writableEnded || res.destroyed;
     if (!clientGone) {
-      emit({
-        ...openAIError("upstream stream truncated before completion", "upstream_error"),
-        id, object: "chat.completion.chunk", created, model, choices: [],
-      });
+      emit(openAIError("upstream stream truncated before completion", "upstream_error"));
     }
     safeEnd(res);
     return;
