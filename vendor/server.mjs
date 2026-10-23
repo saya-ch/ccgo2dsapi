@@ -283,6 +283,48 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
 }
 
 /**
+ * 等上游吐出第一个事件，但不消费它。
+ *
+ * SSE 一旦 writeHead(200) 就改不了状态码，之后上游断开只能报错。
+ * 实测上游在建立连接后不久会 ECONNRESET（网关日志 "fetch failed (ECONNRESET)"、
+ * pi-ai 那边的 "terminated"）。如果能在发 200 之前就发现这条流是坏的，
+ * 就能整个重来，用户完全无感。
+ *
+ * 返回 { firstEvent, rest }：rest 是已产出事件的异步迭代器，
+ * firstEvent 需要由调用方先处理。
+ */
+async function peekFirstEvent(body, timeoutMs) {
+  const iterator = body[Symbol.asyncIterator]();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const step = await iterator.next();
+    if (step.done) {
+      const tail = buf.trim();
+      if (tail) {
+        try { return { firstEvent: JSON.parse(tail), iterator, pendingBuf: "" }; } catch { }
+      }
+      throw Object.assign(new Error("upstream closed before sending any event"), {
+        status: 502, retryable: true,
+      });
+    }
+    buf += typeof step.value === "string" ? step.value : decoder.decode(step.value, { stream: true });
+    const parts = buf.split("\n");
+    buf = parts.pop() ?? "";
+    for (const line of parts) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        return { firstEvent: JSON.parse(t), iterator, pendingBuf: buf };
+      } catch { }
+    }
+  }
+  throw Object.assign(new Error("upstream sent no event in time"), { status: 504, retryable: true });
+}
+
+/**
  * 为一次流式响应建立中止通道：客户端断开时取消上游请求，
  * 避免连接已死还继续读上游、白耗配额。
  */
@@ -601,6 +643,41 @@ async function handleOpenAI(req, res) {
     });
   }
 
+  // ── 预热：先确认上游真的会吐数据，再向客户端发 200 ──
+  // 上游在开始阶段断开时（ECONNRESET / terminated），此时还没发 headers，
+  // 可以整个重来；一旦发了 200 就只能报错。
+  let firstEvent = null;
+  let upstreamIterator = null;
+  let pendingBuf = "";
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    try {
+      const pk = await peekFirstEvent(upstream.body, 120000);
+      firstEvent = pk.firstEvent;
+      upstreamIterator = pk.iterator;
+      pendingBuf = pk.pendingBuf ?? "";
+      break;
+    } catch (e) {
+      if (attempt < 2 && e.retryable) {
+        log(`warmup failed (${e.message}), retrying ${attempt + 1}/2`);
+        const wait = 500 * Math.pow(2, attempt) + Math.random() * 200;
+        await new Promise((r) => setTimeout(r, wait));
+        try {
+          upstream = await callUpstream({
+            model, messages: t.messages, system: t.system,
+            tools: t.tools.length ? t.tools : undefined,
+            maxTokens: t.maxTokens, temperature: t.temperature,
+            effort: t.effort === undefined ? "high" : t.effort,
+            signal: abortCh?.signal, apiKey: resolveApiKey(req),
+          });
+          continue;
+        } catch (retryErr) {
+          throw retryErr;
+        }
+      }
+      throw e;
+    }
+  }
+
   sendSseHeaders(res);
   const emit = (obj) => safeWrite(res, `data: ${JSON.stringify(obj)}\n\n`);
   const chunk = (delta, finish = null) => ({
@@ -617,7 +694,7 @@ async function handleOpenAI(req, res) {
   let failed = false;
 
   try {
-    for await (const ev of readEvents(upstream.body)) {
+    for await (const ev of readEvents({ firstEvent: firstEvent, iterator: upstreamIterator, pendingBuf })) {
       // A4: 客户端断开后停止消费，不再向上游要数据
       if (res.writableEnded || res.destroyed) break;
       // B5: 客户端持续跟不上，放弃这条流，避免内存无界增长
@@ -1141,19 +1218,49 @@ const IDLE_TIMEOUT_MS = Number(argOf("--idle-timeout", "180000"));
  * 上游「发一半静默」会让请求永久挂起，所以这里加 idle 超时：
  * 超过 IDLE_TIMEOUT_MS 没有新数据就判定卡死并抛错。
  */
-async function* readEvents(stream) {
+/**
+ * 逐行产出上游 NDJSON 事件。
+ *
+ * 支持「预热」形态：调用方已经用 peekFirstEvent 取出了第一个事件，
+ * 这里先把它吐出来，再接着迭代剩余部分 —— 否则那个事件会丢。
+ *
+ * 参数可以是原始 ReadableStream，也可以是 { firstEvent, iterator, pendingBuf }。
+ */
+async function* readEvents(source) {
+  // 预热形态：先吐已取出的事件
+  if (source && typeof source === "object" && "firstEvent" in source) {
+    const { firstEvent, iterator, pendingBuf } = source;
+    if (firstEvent) yield firstEvent;
+    yield* drainIterator(iterator, pendingBuf ?? "");
+    return;
+  }
+  yield* drainIterator(source[Symbol.asyncIterator](), "");
+}
+
+/** 从迭代器持续解析 NDJSON，直到流结束 */
+async function* drainIterator(iterator, initialBuf) {
   const decoder = new TextDecoder();
-  let buf = "";
+  let buf = initialBuf;
   let gotAny = false;
-  const iterator = stream[Symbol.asyncIterator]();
+
+  // 先把 initialBuf 里可能完整的一行吐出来
+  if (buf) {
+    const parts = buf.split("\n");
+    buf = parts.pop() ?? "";
+    for (const line of parts) {
+      const t = line.trim();
+      if (!t) continue;
+      try { yield JSON.parse(t); gotAny = true; } catch { }
+    }
+  }
+
   while (true) {
     const nextPromise = iterator.next();
-    // 首事件和后续事件的容忍度不同：首事件要等上游处理完整个上下文，
-    // 后续事件之间才该用较短的 idle 阈值。
     const limit = gotAny ? IDLE_TIMEOUT_MS : FIRST_EVENT_MS;
     let timer;
     const timeout = new Promise((_, rej) => {
       timer = setTimeout(() => {
+        log(`timeout: ${gotAny ? "idle-after-event" : "no-first-event"} limit=${limit}ms bufLen=${buf.length}`);
         rej(Object.assign(
           new Error(gotAny
             ? `upstream idle for ${limit}ms after first event`
@@ -1174,16 +1281,19 @@ async function* readEvents(stream) {
       clearTimeout(timer);
     }
 
-    if (step.done) break;
+    if (step.done) {
+      log(`stream closed: bufLen=${buf.length} gotAny=${gotAny}`);
+      break;
+    }
     gotAny = true;
     const chunk = step.value;
     buf += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
     const parts = buf.split("\n");
     buf = parts.pop() ?? "";
     for (const line of parts) {
-      const line2 = line.trim();
-      if (!line2) continue;
-      try { yield JSON.parse(line2); } catch { }
+      const t = line.trim();
+      if (!t) continue;
+      try { yield JSON.parse(t); } catch { }
     }
   }
   const tail = buf.trim();
