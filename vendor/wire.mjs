@@ -21,6 +21,25 @@ export const ROUTE_USAGE_SUMMARY = "/alpha/usage/summary";
 
 export const DEFAULT_MAX_TOKENS = 64000;
 
+/**
+ * 上游硬上限（实测 2026-10-23）。
+ *
+ * 超过这个值上游直接 400：
+ *   "Too big: expected number to be <=200000 at params.max_tokens"
+ *
+ * 客户端配置常写 256000（DSH 的默认 maxTokens 就是它），必须钳制，
+ * 否则整个请求被拒，而客户端往往把它归类成传输错误，看起来像断流。
+ */
+export const MAX_MAX_TOKENS = 200000;
+
+/** 把请求的 max_tokens 钳到上游可接受范围 */
+export function clampMaxTokens(v) {
+  if (v === undefined || v === null) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.min(Math.floor(n), MAX_MAX_TOKENS);
+}
+
 /** 头名常量，对应 cli.mjs 的 Sy 对象 */
 export const H = {
   OAUTH_TOKEN: "x-oauth-token",
@@ -132,7 +151,7 @@ export function buildGenerateBody(o) {
     messages: o.messages,
     tools: o.tools,
     system: o.system,
-    max_tokens: o.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: clampMaxTokens(o.maxTokens) ?? DEFAULT_MAX_TOKENS,
     stream: true,
   };
   if (o.temperature !== undefined) params.temperature = o.temperature;

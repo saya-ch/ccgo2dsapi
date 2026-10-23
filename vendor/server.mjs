@@ -792,6 +792,13 @@ async function handleAnthropic(req, res) {
           }),
         });
         emit("message_stop", {});
+        logRequest({
+          protocol: "anthropic", model, stream: true, status: 200,
+          end: "ok",
+          in: ev.totalUsage?.inputTokens, out: ev.totalUsage?.outputTokens,
+          reasoning: ev.totalUsage?.outputTokenDetails?.reasoningTokens,
+          ms: Date.now() - t0,
+        });
       } else if (ev.type === "error") {
         // A3: 先把已打开的 content block 关掉，再发 error —— 否则客户端
         // 永远等不到 content_block_stop，界面会卡在"正在输出"。
@@ -818,6 +825,11 @@ async function handleAnthropic(req, res) {
     closeBlock();
     const clientGone = res.writableEnded || res.destroyed;
     if (!clientGone) {
+      logRequest({
+        protocol: "anthropic", model, stream: true, status: 200,
+        end: res.writableEnded || res.destroyed ? "client_gone" : "truncated",
+        ms: Date.now() - t0,
+      });
       emit("error", anthropicError("upstream stream truncated before completion", "api_error"));
     }
   }

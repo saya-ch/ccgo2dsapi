@@ -101,7 +101,7 @@ export function openAIToWire(req) {
       description: t.function?.description ?? t.description,
       input_schema: t.function?.parameters ?? t.parameters ?? { type: "object", properties: {} },
     })),
-    maxTokens: req.max_tokens ?? req.max_completion_tokens,
+    maxTokens: clamp(req.max_tokens ?? req.max_completion_tokens),
     temperature: req.temperature,
     effort: normalizeEffort(req.reasoning_effort),
   };
@@ -223,7 +223,7 @@ export function anthropicToWire(req) {
       description: t.description,
       input_schema: t.input_schema ?? { type: "object", properties: {} },
     })),
-    maxTokens: req.max_tokens,
+    maxTokens: clamp(req.max_tokens),
     temperature: req.temperature,
     effort: anthropicEffort(req),
   };
@@ -287,6 +287,20 @@ export function wireToAnthropicUsage(u) {
 
 // ══════════════════════════════════════════════════════════
 // 共用
+// ══════════════════════════════════════════════════════════
+
+/**
+ * 上游 max_tokens 硬上限是 200000，超过直接 400。
+ * 客户端常配 256000（DSH 默认值），这里先钳住，
+ * 免得整条请求被拒还被误报成传输层错误。
+ */
+const UPSTREAM_MAX_TOKENS_CAP = 200000;
+function clamp(v) {
+  if (v === undefined || v === null) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.min(Math.floor(n), UPSTREAM_MAX_TOKENS_CAP);
+}
 // ══════════════════════════════════════════════════════════
 
 function toArray(c) {

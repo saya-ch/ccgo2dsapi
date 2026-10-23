@@ -105,7 +105,12 @@ export function responsesToWire(body) {
     messages,
     system: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
     tools: toWireToolsFromResponses(body.tools),
-    maxTokens: body.max_output_tokens,
+    // Responses 的 max_output_tokens 同样受上游 200000 限制
+    maxTokens: (() => {
+      const n = Number(body.max_output_tokens);
+      if (!Number.isFinite(n) || n <= 0) return undefined;
+      return Math.min(Math.floor(n), 200000);
+    })(),
     temperature: body.temperature,
     effort: responsesEffort(body.reasoning),
     toolChoice: body.tool_choice,
