@@ -1,14 +1,15 @@
 // verify-responses.mjs —— 对照 DeepSeek 官方 Responses API 规范验证
 //
 // 基准：https://api-docs.deepseek.com/zh-cn/guides/responses_api
-// 注意：Responses 由 tools/responses-server.mjs 提供，默认端口 8788。
+// 注意：三套协议由 vendor/server.mjs 同端口提供，默认 8787。
 //
 // 用法：
 //   node tools/verify-responses.mjs [port]
 //   npm run verify:responses
 import http from "node:http";
 
-const PORT = Number(process.argv[2] || 8788);
+// 三套协议现在共用 8787；8788 是早期独立适配层的端口，已废弃
+const PORT = Number(process.argv[2] || 8787);
 const MODEL = "deepseek/deepseek-v4-flash";
 
 function post(body, timeout = 120000) {

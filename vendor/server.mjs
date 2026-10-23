@@ -313,11 +313,18 @@ async function peekFirstEvent(body, timeoutMs) {
     buf += typeof step.value === "string" ? step.value : decoder.decode(step.value, { stream: true });
     const parts = buf.split("\n");
     buf = parts.pop() ?? "";
-    for (const line of parts) {
-      const t = line.trim();
+    // 关键：一行解析成功后不能直接 return —— parts 里剩下的完整行会全部丢失。
+    // 上游常在同一个 chunk 里塞好几个事件，那样返回第一个就会吞掉其余事件，
+    // 客户端看到的流中间凭空少了一段，最终表现为「流意外结束」。
+    for (let idx = 0; idx < parts.length; idx++) {
+      const t = parts[idx].trim();
       if (!t) continue;
       try {
-        return { firstEvent: JSON.parse(t), iterator, pendingBuf: buf };
+        const first = JSON.parse(t);
+        // 未解析的剩余行 + 当前 buf 一起留给后续消费
+        const leftover = parts.slice(idx + 1).join("\n");
+        const rest = leftover ? (buf ? leftover + "\n" + buf : leftover) : buf;
+        return { firstEvent: first, iterator, pendingBuf: rest };
       } catch { }
     }
   }
