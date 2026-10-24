@@ -333,6 +333,63 @@ const r = !registry.supportsVision({model}) && hasImage2({messages})
 
 ---
 
+## 12. 上游架构：路由层，不是自部署（官方文档声明）
+
+这一点决定了排查上游问题时的基本假设，所以单独记一节。
+
+官方 ZDR 文档（`/docs/resources/zdr`）的 Routing 章节原文：
+
+> A ZDR request routes only to **providers** that support ZDR for the requested
+> model and have capacity at the time of the request.
+>
+> **The upstream may change**: The provider serving your ZDR request may differ
+> from the one serving the same model without ZDR.
+>
+> **The price follows the upstream**: Each ZDR provider sets its own rates.
+> We pass through the provider's rates **with no markup**.
+
+Provider API 文档（`/docs/provider`）：
+
+> **No markup**: Requests bill at the **underlying API rates**.
+
+**结论：Command Code 是路由层。** 它把请求转发给上游 provider，同一模型的
+不同请求**可能由不同 provider 服务**。DeepSeek 模型的具体来源未公开，可能是
+DeepSeek 官方 API、OpenRouter、Vercel AI Gateway 或其他转售商 —— CLI 源码里出现
+`openrouter:`、`vercel-ai-gateway:` 前缀的模型 id 就是直接痕迹。
+
+### 这解释了几类观测到的波动
+
+| 现象 | 原因 |
+|---|---|
+| TPS 在 115–473 之间大幅波动 | 不同 provider 的实例性能不同 |
+| 连接偶发 `ECONNRESET` / `other side closed` | 某个 provider 的稳定性较差 |
+| 缓存命中时有时无 | 不同 provider 对 prompt cache 的支持程度不同 |
+| 存在 `-fast` 变体（250–300 TPS） | 某个 provider 的加速实例 |
+| 错误信息建议「换其他 API 供应商」 | 它自己就是这个定位 |
+
+**排查原则：不要假设上游行为恒定。** 同一个请求昨天成功今天失败，可能不是代码问题，
+而是这次被路由到了另一个 provider。判断时应看 `logs/gateway.log` 里的具体错误码
+（`ECONNRESET` / `UND_ERR_SOCKET` / 429 / 400），而不是看「上次明明可以」。
+
+### 关于套餐额度杠杆
+
+Go 套餐 $1/月给 $10 credits（10×）、GOAT $10 给 $80（8×），看起来不像转售能负担。
+Provider API 文档里写明这类是促销：
+
+> **DEAL** deepseek-v4.1-flash boosted usage: $10 Go, $80 GOAT, $90 Pro
+> **DEAL** minimax-m3 **2× usage**
+
+即 **boosted usage**（补贴额度），与后端成本无关。
+
+### 方法论教训
+
+曾据「10× 杠杆不可能来自纯转售」推断「最可能是自部署」。**这个推断是错的**，
+被官方文档直接推翻：杠杆来自促销补贴，不是成本优势。
+
+类似地，也曾试图用「模型命名风格」「同模型输出相似度」判断上游归属，两者都不成立：
+命名风格是约定，输出受采样与系统提示影响。**判断服务架构应该查官方声明，不是从
+表面特征反推。**
+
 ## 与 npm 代理包的差异汇总
 
 | 项 | npm 代理包 | 官方 CLI | 影响 |
@@ -350,7 +407,7 @@ const r = !registry.supportsVision({model}) && hasImage2({messages})
 ## 未知项（未能确认）
 
 1. `config` 对象的完整结构 —— 仅知 `workingDir/date/environment` 等由 CLI 组装
-2. `/provider/v1/models` 的实际来源 —— CLI 内无该字面量
+2. `/provider/v1/models` 聚合的具体来源 —— 已确认它返回 93 个跨厂商模型、全部标记 `owned_by=command-code`，且上游是路由层（见第 12 节）；但它内部如何汇总各家目录仍未公开
 3. `x-oss-primary-provider` 的取值语义
 4. `traceparent` 的 traceId 生成算法（`getTraceId`）
 5. 反代检测的具体判据（未见 "Proxy use detected" 字面量，可能在服务端）

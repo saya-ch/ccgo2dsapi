@@ -49,6 +49,9 @@
 
 - `docs/COMMAND-CODE-PROTOCOL.md` 补充：上游 `max_tokens` 上限、上下文窗口、
   连接重置行为、180 次思考回传实验的完整数据与统计、方法论教训。
+- `docs/COMMAND-CODE-PROTOCOL.md` 新增第 12 节：上游是**路由层**而非自部署，
+  同一模型的不同请求可能由不同 provider 服务。这解释了 TPS 波动、连接偶发重置、
+  缓存行为不一致等现象，也确立了「不要假设上游行为恒定」的排查原则。
 - 两版 README 补充排障条目，并明确本项目**只对 Go 套餐有意义** ——
   GOAT 及以上套餐有官方 API（`https://api.commandcode.ai/provider/v1`）。
 
