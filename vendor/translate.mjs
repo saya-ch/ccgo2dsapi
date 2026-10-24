@@ -1,4 +1,5 @@
 // translate.mjs —— 两种协议 ↔ wire 格式的翻译
+import { normalizeToolPairs } from "./wire.mjs";
 //
 // 输入侧：OpenAI Chat Completions / Anthropic Messages 的请求
 // 输出侧：wire.mjs 的 messages/tools/system
@@ -109,7 +110,7 @@ export function openAIToWire(req) {
   }
 
   return {
-    messages,
+    messages: normalizeToolPairs(messages),
     system: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
     tools: (req.tools || []).map((t) => ({
       name: t.function?.name ?? t.name,
@@ -237,7 +238,7 @@ export function anthropicToWire(req) {
   }
 
   return {
-    messages,
+    messages: normalizeToolPairs(messages),
     system: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
     tools: (req.tools || []).map((t) => ({
       name: t.name,

@@ -4,6 +4,7 @@
 // 规格：https://api-docs.deepseek.com/zh-cn/guides/responses_api
 
 import { wireToOpenAIUsage } from "./translate.mjs";
+import { normalizeToolPairs } from "./wire.mjs";
 
 // ── 请求：input items → wire messages ────────────────────
 function textOf(content) {
@@ -132,7 +133,7 @@ export function responsesToWire(body) {
   }
 
   return {
-    messages,
+    messages: normalizeToolPairs(messages),
     system: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
     tools: toWireToolsFromResponses(body.tools),
     // Responses 的 max_output_tokens 同样受上游 200000 限制

@@ -93,6 +93,64 @@ export function buildHeaders(o = {}) {
   return { ...h, ...(o.extra || {}) };
 }
 
+/**
+ * 修补 tool-call / tool-result 的配对。
+ *
+ * 上游会强校验：如果某条 assistant 消息里的 tool-call 没有对应的 tool-result，
+ * 直接报错 ——
+ *   {"type":"server_error","message":"Tool result is missing for tool call c1."}
+ *
+ * 客户端很容易产生这种不完整的历史：
+ *   - 用户在工具执行途中打断
+ *   - 上下文被裁剪，恰好切断了配对
+ *   - 客户端自身的 bug
+ * 结果是用户看到「请求失败」，而原因藏在历史数据结构里。
+ *
+ * 这里给缺失的 tool-call 补一条说明性的结果，让请求能继续。
+ * 补的内容明确告知模型"该工具没有执行结果"，避免它编造数据。
+ */
+export function normalizeToolPairs(messages) {
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    out.push(m);
+    if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
+
+    // providerExecuted 的工具由上游自己执行，不需要客户端提供结果
+    const calls = m.content.filter((c) => c && c.type === "tool-call" && !c.providerExecuted);
+    if (calls.length === 0) continue;
+
+    const next = messages[i + 1];
+    const resolved = new Set();
+    if (next && next.role === "tool" && Array.isArray(next.content)) {
+      for (const r of next.content) {
+        if (r && r.type === "tool-result" && r.toolCallId != null) resolved.add(r.toolCallId);
+      }
+    }
+
+    const missing = calls.filter((c) => !resolved.has(c.toolCallId));
+    if (missing.length === 0) continue;
+
+    const filler = missing.map((c) => ({
+      type: "tool-result",
+      toolCallId: c.toolCallId,
+      toolName: c.toolName,
+      output: {
+        type: "text",
+        value: "[no result] This tool call did not produce a result (it was cancelled or its output is unavailable). Do not invent its contents.",
+      },
+    }));
+
+    if (next && next.role === "tool" && Array.isArray(next.content)) {
+      next.content.push(...filler);
+    } else {
+      // 没有紧跟的 tool 消息，插一条
+      out.push({ role: "tool", content: filler });
+    }
+  }
+  return out;
+}
+
 /** sess_ 前缀 + 16 位 hex（观察自 generateSessionId） */
 export function generateSessionId() {
   return `sess_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
