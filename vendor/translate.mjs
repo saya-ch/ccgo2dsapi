@@ -36,6 +36,8 @@ export function openAIToWire(req) {
   const systemParts = [];
   const messages = [];
   const toolNames = new Map();
+  // 历史 thinking 是否有效，取决于请求有没有 tools —— 见 assistant 分支的说明
+  const hasTools = Array.isArray(req.tools) && req.tools.length > 0;
 
   for (const m of req.messages || []) {
     if (m.role === "system" || m.role === "developer") {
@@ -45,14 +47,18 @@ export function openAIToWire(req) {
 
     if (m.role === "assistant") {
       const content = [];
-      // 历史思考必须回传。官方文档写得很明确：
-      //   「携带了 tools 参数的请求，在后续所有请求中，必须完整回传 reasoning_content
-      //     给 API —— 即使该轮模型未实际进行工具调用。若未正确回传，API 会返回 400。」
-      // 之前这里完全忽略 reasoning_content，模型看不到自己上一轮怎么想的，
-      // 于是每轮重新推理一遍，表现为反复「我已经查清了……」然后原地打转。
-      const reasoning = m.reasoning_content ?? m.reasoning ?? "";
-      if (typeof reasoning === "string" && reasoning.trim()) {
-        content.push({ type: "reasoning", text: reasoning });
+      // 历史思考只在【同时】满足两个条件时才会被上游拼进上下文（180 次实验）：
+      //   1. 请求携带 tools
+      //   2. 回传 reasoning_content
+      // 缺任一条都是白费：只带 tools 不回传 = 0/60，只回传不带 tools = 0/60，
+      // 两者都有 = 21/60（Fisher p=5.98e-12）。
+      // 不带 tools 时上游会静默丢弃，所以这里也跳过 —— 省下上下文，
+      // 历史 reasoning 往往比正文还长，全量塞回去会加速撞上 1048576 窗口。
+      if (hasTools) {
+        const reasoning = m.reasoning_content ?? m.reasoning ?? "";
+        if (typeof reasoning === "string" && reasoning.trim()) {
+          content.push({ type: "reasoning", text: reasoning });
+        }
       }
       const text = typeof m.content === "string" ? m.content : extractText(m.content);
       if (text) content.push({ type: "text", text });
@@ -170,6 +176,8 @@ export function wireToOpenAIUsage(u) {
 // ══════════════════════════════════════════════════════════
 
 export function anthropicToWire(req) {
+  // 历史 thinking 是否有效，取决于请求有没有 tools
+  const hasTools = Array.isArray(req.tools) && req.tools.length > 0;
   const systemParts = [];
   if (typeof req.system === "string") systemParts.push(req.system);
   else if (Array.isArray(req.system)) {
@@ -187,7 +195,11 @@ export function anthropicToWire(req) {
         // 上游 wire 的 reasoning 块是 { type: "reasoning", text }，
         // 不是内部块形状 { type: "thinking", thinking }。
         // 写错会被上游当未知类型忽略（历史思考丢失）或 400 拒整条请求。
-        else if (p.type === "thinking") content.push({ type: "reasoning", text: p.thinking ?? "" });
+        // 同样只在带 tools 时有意义；空内容不产出空块
+      else if (p.type === "thinking" && hasTools) {
+        const txt = typeof p.thinking === "string" ? p.thinking : "";
+        if (txt.trim()) content.push({ type: "reasoning", text: txt });
+      }
         else if (p.type === "tool_use") {
           toolNames.set(p.id, p.name);
           content.push({ type: "tool-call", toolCallId: p.id, toolName: p.name, input: p.input });

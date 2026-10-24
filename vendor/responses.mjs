@@ -45,6 +45,8 @@ export function responsesToWire(body) {
   // reasoning 项与后续的 assistant/tool-call 可能分成多个 item 到达，
   // 先攒着，附加到下一个 assistant 消息上。
   const pendingReasoning = [];
+  // 与另外两套协议一致：只有带 tools 时，历史 reasoning 才会被上游拼进上下文
+  const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
 
   if (typeof body.instructions === "string" && body.instructions) {
     systemParts.push(body.instructions);
@@ -120,8 +122,10 @@ export function responsesToWire(body) {
     // reasoning 项：官方语义要求带 tools 时回传历史思维链，
     // 否则模型看不到自己上一轮怎么想的，会反复重新推理。
     if (t === "reasoning") {
-      const txt = item.summary ? textOf(item.summary) : (item.content ? textOf(item.content) : "");
-      if (txt) pendingReasoning.push(txt);
+      if (hasTools) {
+        const txt = item.summary ? textOf(item.summary) : (item.content ? textOf(item.content) : "");
+        if (txt) pendingReasoning.push(txt);
+      }
       continue;
     }
     // web_search_call 等其余类型仍按官方语义忽略
