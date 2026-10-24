@@ -161,6 +161,68 @@ readTimezone       时区
 
 **顺序规则**：工具结果消息先 push，用户内容消息后 push。
 
+### 历史思维链回传（实测：不强制，但应与官方 CLI 一致）
+
+Command Code 是聚合平台，**不能把它等同于某一个厂商的 API 规则**。这里的结论来自实测，
+不是从 DeepSeek 官方文档推断的。
+
+#### 实测结果（2026-10-24）
+
+带 tools、历史含一轮 assistant 工具调用，对比回传与不回传 reasoning 块：
+
+| 场景 | HTTP | 返回 reasoning | 返回 text |
+|---|---|---|---|
+| 回传 reasoning | 200 | 21 字 | 12 字 |
+| 不回传 reasoning | 200 | 0 字 | 29 字 |
+
+各重复 3 次的受控对比（换用需要推理的问题）：
+
+| 组 | 平均 reasoning | 平均 text | reasoning=0 次数 |
+|---|---|---|---|
+| 回传 | 156 字 | 536 字 | 0/3 |
+| 不回传 | 183 字 | 630 字 | 0/3 |
+
+**结论：上游不强制校验。** 不回传不会 400，也不会导致模型停止思考。
+
+> 注意区分：**DeepSeek 官方 API**（`api.deepseek.com`）明确要求带 tools 时必须回传
+> `reasoning_content`，否则 400。但那是官方直连端点的规则，Command Code 的
+> `/alpha/generate` 不适用。两者是不同的服务，不要混用结论。
+
+#### 官方 CLI 的做法
+
+尽管上游不强制，官方 CLI 仍然会回传。`toWireMessages` 的 assistant 分支：
+
+```js
+"thinking" === n.type && e.push({ type: "reasoning", text: n.thinking })
+```
+
+无条件转换，没有 `tools` 判断。所以「回传」是这个协议的预期形态，只是服务端不做强制校验。
+
+#### 本项目的选择
+
+与官方 CLI 保持一致，三套协议都把历史思维链转成 `{ type: "reasoning", text }`：
+
+| 客户端协议 | 历史思维链位置 |
+|---|---|
+| OpenAI Chat Completions | `message.reasoning_content` |
+| Anthropic Messages | `content` 里 `{ type: "thinking", thinking }` |
+| Responses | 独立的 `{ type: "reasoning", summary: [...] }` item |
+
+三个实现细节（每个都会造成静默失败）：
+
+1. **wire 字段名是 `text` 而不是 `thinking`**。写错会被上游当未知字段丢掉，不报错。
+2. **Responses 的 reasoning 是独立 item**，与 `function_call` 分开到达，需先暂存再附加到
+   下一个 assistant 消息上。
+3. **`reasoning.summary` 的块类型是 `summary_text`**。文本提取若只认
+   `input_text`/`output_text`/`text`，会得到空字符串 —— 块存在但内容为空，看起来正常，
+   实际什么都没回传。
+
+#### 不要据此解释「模型反复推理」
+
+曾经把「模型反复陈述同一结论」归因于历史 reasoning 丢失，**这个归因没有证据支持**：
+实测不回传时模型仍然正常推理。遇到反复现象应先排查上下文长度、指令冲突等其它原因，
+不要把这条规则当作解释。
+
 ## 5. tools / system（观察）
 
 ```js
