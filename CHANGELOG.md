@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.2.0
+
+会话中断、请求被拒、模型反复推理这三类问题的根因修复。其中前三项是会直接
+让用户看到失败的缺陷，后面几项是静默的上下文丢失。
+
+### 修复
+
+- **`max_tokens` 超过上游上限导致请求被拒** —— 上游硬上限是 200000，超过直接 400：
+  `Validation error: Too big: expected number to be <=200000 at "params.max_tokens"`。
+  客户端常配 256000（DSH 的默认值），整条请求在推理开始前就被拒，而客户端把它归类成
+  传输错误，界面显示成「流意外中断」。三套协议现在都钳制到上限内。
+- **工具配对断裂导致请求失败** —— 上游会校验 tool-call 与 tool-result 的配对，
+  缺失时直接报 `Tool result is missing for tool call c1.`。工具执行途中取消、
+  上下文裁剪切断配对都会触发。现在发往上游前统一修补，补一条说明「该调用没有结果、
+  不要编造」的占位结果。
+- **客户端主动断开被误报成上游截断** —— 切换会话或点「继续」时连接被关闭，
+  之前会被判定为截断并报错，让用户以为会话失败。
+- **错误帧混入 chunk 字段** —— 之前发的是 `{error:{...}, id, object, choices:[]}`，
+  客户端看到 `choices` 就按普通 chunk 解析，错误被吞掉，最终表现成「流没有 finish」。
+  现在错误帧是纯 `{"error": {...}}`。
+- **`fetch` 层失败不参与重试** —— 重试循环只看 HTTP 状态码，DNS 失败、连接重置、
+  TLS 错误会直接穿透。现在这些也进入指数退避。
+- **发 200 之前先确认上游活着** —— 上游有概率在建连后不久重置连接。SSE 一旦
+  `writeHead(200)` 就无法改状态码，之前只能报错。现在先取一个事件，拿不到就整体重试。
+- **面板版本号一直是 v1.0.0** —— `/health` 里写死的字面量，package.json 升级后不跟随。
+
+### 新增
+
+- **历史思维链回传** —— 之前 OpenAI 与 Responses 两条路径完全丢弃 `reasoning_content`，
+  模型看不到自己上一轮的推理。180 次对照实验确认：只有**同时**满足「请求带 tools」
+  与「回传 reasoning_content」，历史思考才会被拼接进上下文（21/60 对 0/120，
+  Fisher p=5.98×10⁻¹²）。现在三套协议都按此实现，并在不带 tools 时跳过以省上下文。
+- **`normalizeToolPairs()`** —— 修补 tool-call/tool-result 配对。
+- **错误原因透出** —— `describeFetchError()` 从 `error.cause` 取出 `ECONNRESET` /
+  `UND_ERR_SOCKET` 等真实原因，不再只有一句 `fetch failed`。
+- **请求日志增加 `end` 字段** —— `ok` / `truncated` / `client_gone` / `upstream_error`，
+  每次请求的收尾状态可查。
+
+### 变更
+
+- 请求日志默认开启，写到 `~/.commandcode/ccgo2dsapi-requests.log`。
+  `--request-log off` 可关闭。
+- 首事件与事件间隔使用不同超时：`--first-event-timeout`（默认 600 秒）、
+  `--idle-timeout`（默认 180 秒）。之前用同一个阈值管两件事。
+
+### 文档
+
+- `docs/COMMAND-CODE-PROTOCOL.md` 补充：上游 `max_tokens` 上限、上下文窗口、
+  连接重置行为、180 次思考回传实验的完整数据与统计、方法论教训。
+- 两版 README 补充排障条目，并明确本项目**只对 Go 套餐有意义** ——
+  GOAT 及以上套餐有官方 API（`https://api.commandcode.ai/provider/v1`）。
+
 ## v1.1.0
 
 离线验证、请求日志、重试、元数据实时化。
