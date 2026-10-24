@@ -9,8 +9,15 @@ import { wireToOpenAIUsage } from "./translate.mjs";
 function textOf(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
+  // summary_text 是 reasoning.summary 里用的类型 —— 漏掉它会让历史思维链
+  // 静默变成空字符串，看起来像「成功回传了但内容为空」。
   return content
-    .filter((p) => p && (p.type === "input_text" || p.type === "output_text" || p.type === "text"))
+    .filter((p) => p && (
+      p.type === "input_text" ||
+      p.type === "output_text" ||
+      p.type === "text" ||
+      p.type === "summary_text"
+    ))
     .map((p) => p.text ?? "")
     .join("");
 }
@@ -35,6 +42,9 @@ export function responsesToWire(body) {
   const systemParts = [];
   const messages = [];
   const toolNames = new Map();
+  // reasoning 项与后续的 assistant/tool-call 可能分成多个 item 到达，
+  // 先攒着，附加到下一个 assistant 消息上。
+  const pendingReasoning = [];
 
   if (typeof body.instructions === "string" && body.instructions) {
     systemParts.push(body.instructions);
@@ -58,7 +68,13 @@ export function responsesToWire(body) {
         continue;
       }
       if (role === "assistant") {
-        if (text) messages.push({ role: "assistant", content: [{ type: "text", text }] });
+        const parts = [];
+        if (pendingReasoning.length) {
+          parts.push({ type: "reasoning", text: pendingReasoning.join("") });
+          pendingReasoning.length = 0;
+        }
+        if (text) parts.push({ type: "text", text });
+        if (parts.length > 0) messages.push({ role: "assistant", content: parts });
         continue;
       }
       const parts = [];
@@ -75,10 +91,13 @@ export function responsesToWire(body) {
       let parsed;
       try { parsed = typeof args === "string" ? JSON.parse(args) : args; } catch { parsed = {}; }
       toolNames.set(id, name);
-      messages.push({
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: id, toolName: name, input: parsed }],
-      });
+      const parts = [];
+      if (pendingReasoning.length) {
+        parts.push({ type: "reasoning", text: pendingReasoning.join("") });
+        pendingReasoning.length = 0;
+      }
+      parts.push({ type: "tool-call", toolCallId: id, toolName: name, input: parsed });
+      messages.push({ role: "assistant", content: parts });
       continue;
     }
 
@@ -98,7 +117,14 @@ export function responsesToWire(body) {
       });
       continue;
     }
-    // reasoning / web_search_call 等：按官方语义忽略
+    // reasoning 项：官方语义要求带 tools 时回传历史思维链，
+    // 否则模型看不到自己上一轮怎么想的，会反复重新推理。
+    if (t === "reasoning") {
+      const txt = item.summary ? textOf(item.summary) : (item.content ? textOf(item.content) : "");
+      if (txt) pendingReasoning.push(txt);
+      continue;
+    }
+    // web_search_call 等其余类型仍按官方语义忽略
   }
 
   return {

@@ -45,6 +45,15 @@ export function openAIToWire(req) {
 
     if (m.role === "assistant") {
       const content = [];
+      // 历史思考必须回传。官方文档写得很明确：
+      //   「携带了 tools 参数的请求，在后续所有请求中，必须完整回传 reasoning_content
+      //     给 API —— 即使该轮模型未实际进行工具调用。若未正确回传，API 会返回 400。」
+      // 之前这里完全忽略 reasoning_content，模型看不到自己上一轮怎么想的，
+      // 于是每轮重新推理一遍，表现为反复「我已经查清了……」然后原地打转。
+      const reasoning = m.reasoning_content ?? m.reasoning ?? "";
+      if (typeof reasoning === "string" && reasoning.trim()) {
+        content.push({ type: "reasoning", text: reasoning });
+      }
       const text = typeof m.content === "string" ? m.content : extractText(m.content);
       if (text) content.push({ type: "text", text });
       for (const tc of m.tool_calls || []) {
