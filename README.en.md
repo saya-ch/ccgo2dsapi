@@ -319,6 +319,8 @@ You accept the risk of account restrictions or plan termination.
 | No reasoning content | Request omitted `reasoning_effort`, or set it to `none` |
 | 401 | API key is something other than `proxy-managed` |
 | 403 / model not recognized | Wrong model name, or not included in the plan |
+| Model keeps re-deriving the same conclusion | History thinking is not reaching the context. Requires **both**: the request carries `tools` **and** forwards `reasoning_content` — either one alone does nothing (180-trial result, see protocol doc) |
+| `maximum context length` | Conversation exceeds the 1048576-token window; trim history or lower `max_tokens` |
 | Port already in use | The launcher takes over its own stale instance; if another program owns it, pass `-Port` |
 
 ## Uninstall

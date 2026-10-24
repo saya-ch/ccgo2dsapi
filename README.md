@@ -319,6 +319,8 @@ node tools/mock-upstream.mjs --scenario error       # 制造上游错误
 | 看不到思考内容 | 请求未带 `reasoning_effort`，或值为 `none` |
 | 401 | API Key 填了非 `proxy-managed` 的值 |
 | 403 / model not recognized | 模型名不对或不在套餐内 |
+| 模型反复重新推理同一件事 | 历史思维链没进上下文。必须**同时**满足：请求带 `tools` **且**回传 `reasoning_content`，缺任一条都无效（180 次实验结论，见协议文档） |
+| `maximum context length` | 会话超出 1048576 token 窗口，需精简历史或调小 `max_tokens` |
 | 端口被占用 | 启动器会自动接管本项目的旧实例；若占用者是别的程序，用 `-Port` 换端口 |
 
 ## 卸载
