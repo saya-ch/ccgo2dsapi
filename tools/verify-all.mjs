@@ -5,7 +5,7 @@
 //   npm run verify:anthropic  只跑 Anthropic Messages
 //   npm run verify:responses  只跑 Responses
 //
-// 需要 8787（主代理）与 8788（Responses 适配层）都在运行。
+// 需要 8787（三套协议共用同一端口）在运行。
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,10 +71,17 @@ for (const s of suites) {
   const { code, out } = await run(s.script, s.port);
   const m = out.match(/共\s*(\d+)\s*处差异/);
   const diffs = m ? Number(m[1]) : null;
-  // 双重判定：退出码为 0 且解析出的差异数为 0 才算通过。
+  // 子脚本因额度耗尽跳过部分断言时会返回 2，并在汇总行标注「N 组因额度跳过」。
+  // 这种结果既不是 pass 也不是 fail——它是「没验完」，必须单独记为 skipped，
+  // 否则额度耗尽时整张面板会显示假绿。
+  const skipM = out.match(/（(\d+) 组因额度跳过）/);
+  const skippedGroups = skipM ? Number(skipM[1]) : 0;
+  const incomplete = code === 2 || skippedGroups > 0;
+  // 双重判定：退出码为 0 且解析出的差异数为 0、且没有跳过，才算通过。
   // 只看退出码会漏掉那些打印了差异却不设置退出码的脚本。
-  const passed = code === 0 && diffs === 0;
-  results.push({ ...s, status: passed ? "pass" : "fail", diffs });
+  const passed = code === 0 && diffs === 0 && !incomplete;
+  const status = incomplete ? "skipped" : passed ? "pass" : "fail";
+  results.push({ ...s, status, diffs, skippedGroups });
 }
 
 // ── 汇总 ──────────────────────────────────────────────────
@@ -85,7 +92,8 @@ let failed = 0;
 for (const r of results) {
   const tag = r.status === "pass" ? "PASS" : r.status === "skipped" ? "SKIP" : "FAIL";
   const d = r.diffs == null ? "" : `  差异 ${r.diffs}`;
-  console.log(`  ${tag.padEnd(5)} ${r.name}${d}`);
+  const sk = r.skippedGroups ? `  （${r.skippedGroups} 组因额度跳过，未验完）` : "";
+  console.log(`  ${tag.padEnd(5)} ${r.name}${d}${sk}`);
   if (r.status === "fail") failed++;
 }
 
@@ -95,7 +103,7 @@ const skipped = results.filter((r) => r.status === "skipped").length;
 console.log("");
 if (skipped > 0) {
   // SKIP 不等于通过：服务没起来时一个断言都没跑，说「通过」是假绿。
-  console.log(`  ${passed}/${results.length} 套通过，${skipped} 套因服务未启动被跳过`);
+  console.log(`  ${passed}/${results.length} 套通过，${skipped} 套被跳过（服务未启动或额度不足），结果不完整`);
   console.log("  未验证不等于通过，退出码 1");
   process.exit(1);
 }

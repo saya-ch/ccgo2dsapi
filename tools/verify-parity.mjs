@@ -34,6 +34,7 @@ async function postR(payload, tries = 3) {
 }
 
 let diffs = 0;
+let skipped = 0;
 const show = (label, cond, detail, official) => {
   if (!cond) diffs++;
   console.log(`  ${cond ? "OK  " : "DIFF"}  ${label}`);
@@ -41,10 +42,15 @@ const show = (label, cond, detail, official) => {
   if (official) console.log(`        官方: ${official}`);
 };
 
+// 429 = 额度耗尽，不是协议差异。跳过并计数，退出码用 2 表示「未完成」。
+const isQuota = (r) => r.status === 429;
+const skip = (label) => { skipped++; console.log(`  SKIP  ${label}（额度用尽）`); };
+
 // ── 1. 官方模型名 deepseek-flash ─────────────────────────────
 console.log("=== 1. 官方模型名（文档：deepseek-flash / deepseek-v4-pro）===");
 for (const m of ["deepseek-flash", "deepseek-v4-pro", "deepseek/deepseek-v4-flash"]) {
   const r = await postR({ model: m, messages: [{ role: "user", content: "hi" }], max_tokens: 20 });
+  if (isQuota(r)) { skip(`模型名 ${m}`); continue; }
   show(`模型名 ${m}`, r.status === 200, `HTTP ${r.status}`,
     r.status !== 200 ? "官方接受 deepseek-flash" : undefined);
 }
@@ -53,6 +59,7 @@ for (const m of ["deepseek-flash", "deepseek-v4-pro", "deepseek/deepseek-v4-flas
 console.log("\n=== 2. reasoning_effort 档位（官方支持 low/high/max，none 关闭）===");
 for (const e of ["none", "low", "high", "max"]) {
   const r = await postR({ model: MODEL, messages: [{ role: "user", content: "2+2?" }], max_tokens: 200, reasoning_effort: e });
+  if (isQuota(r)) { skip(`reasoning_effort=${e}`); continue; }
   const rt = r.parsed?.usage?.completion_tokens_details?.reasoning_tokens;
   show(`reasoning_effort=${e}`, r.status === 200, `HTTP ${r.status}, reasoning_tokens=${rt}`,
     e === "none" ? "官方 none = 关闭思考" : `官方 ${e} 为合法档位`);
@@ -86,53 +93,73 @@ console.log("\n=== 4. usage 缓存字段（官方有 prompt_cache_hit_tokens/mis
 {
   const big = "请详细解释这段代码的作用：" + "function a(){return 1}".repeat(200);
   const r = await postR({ model: MODEL, messages: [{ role: "user", content: big }], max_tokens: 30 });
-  const u = r.parsed?.usage || {};
-  show("prompt_cache_hit_tokens", u.prompt_cache_hit_tokens !== undefined, String(u.prompt_cache_hit_tokens),
-    "官方返回此字段");
-  show("prompt_cache_miss_tokens", u.prompt_cache_miss_tokens !== undefined, String(u.prompt_cache_miss_tokens),
-    "官方返回此字段");
-  show("prompt_tokens_details.cached_tokens", u.prompt_tokens_details?.cached_tokens !== undefined,
-    String(u.prompt_tokens_details?.cached_tokens), "OpenAI 风格替代");
+  if (isQuota(r)) {
+    skip("usage 缓存字段");
+  } else {
+    const u = r.parsed?.usage || {};
+    show("prompt_cache_hit_tokens", u.prompt_cache_hit_tokens !== undefined, String(u.prompt_cache_hit_tokens),
+      "官方返回此字段");
+    show("prompt_cache_miss_tokens", u.prompt_cache_miss_tokens !== undefined, String(u.prompt_cache_miss_tokens),
+      "官方返回此字段");
+    show("prompt_tokens_details.cached_tokens", u.prompt_tokens_details?.cached_tokens !== undefined,
+      String(u.prompt_tokens_details?.cached_tokens), "OpenAI 风格替代");
+  }
 }
 
 // ── 5. n>1 与 logprobs ─────────────────────────────────────
 console.log("\n=== 5. n>1 / logprobs（官方不支持，反代也不该假装支持）===");
 {
   const rn = await postR({ model: MODEL, messages: [{ role: "user", content: "say one word" }], max_tokens: 30, n: 2 });
-  show("n=2 返回条数", rn.parsed?.choices?.length === 1,
-    `choices.length=${rn.parsed?.choices?.length}`, "官方 DeepSeek 不支持 n>1，静默忽略");
+  if (isQuota(rn)) {
+    skip("n=2 返回条数");
+  } else {
+    show("n=2 返回条数", rn.parsed?.choices?.length === 1,
+      `choices.length=${rn.parsed?.choices?.length}`, "官方 DeepSeek 不支持 n>1，静默忽略");
+  }
   const rl = await postR({ model: MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: 20, logprobs: true });
-  show("logprobs 返回 null/缺失", !rl.parsed?.choices?.[0]?.logprobs,
-    String(!!rl.parsed?.choices?.[0]?.logprobs), "官方不支持 logprobs");
+  if (isQuota(rl)) {
+    skip("logprobs 返回 null/缺失");
+  } else {
+    show("logprobs 返回 null/缺失", !rl.parsed?.choices?.[0]?.logprobs,
+      String(!!rl.parsed?.choices?.[0]?.logprobs), "官方不支持 logprobs");
+  }
 }
 
 // ── 6. 错误格式对齐官方 ─────────────────────────────────────
 console.log("\n=== 6. 错误体格式（官方：{error:{message,type,param,code}}）===");
 {
   const r = await postR({ model: "no-such-model", messages: [{ role: "user", content: "hi" }], max_tokens: 10 });
-  const e = r.parsed?.error;
-  show("是 4xx", r.status >= 400 && r.status < 500, `HTTP ${r.status}`, "官方 400/401/402/422/429");
-  show("error.message 存在", !!e?.message);
-  show("error.type 存在", !!e?.type, String(e?.type), "如 invalid_request_error");
-  show("error.code 存在", e?.code !== undefined, String(e?.code), "如 model_not_found");
-  if (e) console.log("        完整错误体:", JSON.stringify(e).slice(0, 260));
+  if (isQuota(r)) {
+    skip("错误体格式");
+  } else {
+    const e = r.parsed?.error;
+    show("是 4xx", r.status >= 400 && r.status < 500, `HTTP ${r.status}`, "官方 400/401/402/422/429");
+    show("error.message 存在", !!e?.message);
+    show("error.type 存在", !!e?.type, String(e?.type), "如 invalid_request_error");
+    show("error.code 存在", e?.code !== undefined, String(e?.code), "如 model_not_found");
+    if (e) console.log("        完整错误体:", JSON.stringify(e).slice(0, 260));
+  }
 }
 
 // ── 7. 流式细节 ────────────────────────────────────────────
 console.log("\n=== 7. 流式（官方：data: {...}\\n\\n，末尾 data: [DONE]）===");
 {
   const r = await postR({ model: MODEL, messages: [{ role: "user", content: "count 1 to 5" }], max_tokens: 60, stream: true, stream_options: { include_usage: true } });
-  const lines = r.data.split("\n");
-  const dataLines = lines.filter((l) => l.trim().startsWith("data:"));
-  const chunks = [];
-  for (const l of dataLines) { const p = l.trim().slice(5).trim(); if (p === "[DONE]") continue; try { chunks.push(JSON.parse(p)); } catch { } }
-  const last = chunks[chunks.length - 1];
-  show("首 chunk 有 role", !!chunks[0]?.choices?.[0]?.delta?.role, String(chunks[0]?.choices?.[0]?.delta?.role), "assistant");
-  show("含 finish_reason", chunks.some((c) => c.choices?.[0]?.finish_reason), "有一个 chunk 带 finish_reason");
-  show("include_usage 生效", !!last?.usage, JSON.stringify(last?.usage)?.slice(0, 80));
-  show("usage chunk choices 为空", Array.isArray(last?.choices) && last.choices.length === 0);
-  show("以 [DONE] 结束", r.data.trimEnd().endsWith("[DONE]"));
-  show("SSE 双换行分隔", r.data.includes("\n\n"));
+  if (isQuota(r)) {
+    skip("流式细节");
+  } else {
+    const lines = r.data.split("\n");
+    const dataLines = lines.filter((l) => l.trim().startsWith("data:"));
+    const chunks = [];
+    for (const l of dataLines) { const p = l.trim().slice(5).trim(); if (p === "[DONE]") continue; try { chunks.push(JSON.parse(p)); } catch { } }
+    const last = chunks[chunks.length - 1];
+    show("首 chunk 有 role", !!chunks[0]?.choices?.[0]?.delta?.role, String(chunks[0]?.choices?.[0]?.delta?.role), "assistant");
+    show("含 finish_reason", chunks.some((c) => c.choices?.[0]?.finish_reason), "有一个 chunk 带 finish_reason");
+    show("include_usage 生效", !!last?.usage, JSON.stringify(last?.usage)?.slice(0, 80));
+    show("usage chunk choices 为空", Array.isArray(last?.choices) && last.choices.length === 0);
+    show("以 [DONE] 结束", r.data.trimEnd().endsWith("[DONE]"));
+    show("SSE 双换行分隔", r.data.includes("\n\n"));
+  }
 }
 
 // ── 8. 思考模式默认行为 ─────────────────────────────────────
@@ -146,11 +173,16 @@ console.log("\n=== 8. 默认是否思考（官方 Flash 默认开思考）===");
     messages: [{ role: "user", content: "计算 17*23，并解释每一步推理过程。" }],
     max_tokens: 1500,
   });
-  const rt = r.parsed?.usage?.completion_tokens_details?.reasoning_tokens;
-  const hasRC = !!r.parsed?.choices?.[0]?.message?.reasoning_content;
-  show("默认产生 reasoning", (rt ?? 0) > 0, `reasoning_tokens=${rt}`, "官方默认开启思考模式");
-  show("返回 reasoning_content", hasRC, hasRC ? "(有)" : "(无)");
+  if (isQuota(r)) {
+    skip("默认是否思考");
+  } else {
+    const rt = r.parsed?.usage?.completion_tokens_details?.reasoning_tokens;
+    const hasRC = !!r.parsed?.choices?.[0]?.message?.reasoning_content;
+    show("默认产生 reasoning", (rt ?? 0) > 0, `reasoning_tokens=${rt}`, "官方默认开启思考模式");
+    show("返回 reasoning_content", hasRC, hasRC ? "(有)" : "(无)");
+  }
 }
 
-console.log(`\n──────── 共 ${diffs} 处差异 ────────`);
-process.exit(diffs > 0 ? 1 : 0);
+console.log(`\n──────── 共 ${diffs} 处差异${skipped ? `（${skipped} 组因额度跳过）` : ""} ────────`);
+// 退出码约定：0 = 通过；1 = 有真实差异；2 = 因额度跳过、结果不完整。
+process.exit(diffs > 0 ? 1 : skipped > 0 ? 2 : 0);

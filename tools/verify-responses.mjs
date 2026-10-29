@@ -153,8 +153,11 @@ console.log("\n=== 5. 流式事件序列 ===");
 console.log("\n=== 6. 缺 input 与 instructions 应 400 ===");
 {
   const r = await post({ model: MODEL });
-  check("返回 400", r.status === 400, `HTTP ${r.status}`, "400");
+  if (r.status === 429) { console.log("  SKIP  额度已用尽"); skipped++; }
+  else check("返回 400", r.status === 400, `HTTP ${r.status}`, "400");
 }
 
 console.log(`\n──────── 共 ${diffs} 处差异${skipped ? `（${skipped} 组因额度跳过）` : ""} ────────`);
-process.exit(diffs > 0 ? 1 : 0);
+// 退出码约定：0 = 通过；1 = 有真实差异；2 = 因额度跳过、结果不完整。
+// 2 不能和 0 混为一谈，否则 verify-all 会把「没验证」当成「通过」。
+process.exit(diffs > 0 ? 1 : skipped > 0 ? 2 : 0);

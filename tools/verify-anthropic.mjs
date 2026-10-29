@@ -48,6 +48,7 @@ function post(body, headers = {}, timeout = 120000) {
 
 let diffs = 0;
 let quotaHit = false;
+let skipped = 0;
 
 function check(label, ok, detail, official) {
   if (!ok) diffs++;
@@ -61,6 +62,13 @@ function isQuota(r) {
   return false;
 }
 
+// 额度耗尽导致的跳过：既不算通过也不算差异，但要计入 skipped，
+// 让 verify-all 能把它识别成「未完成」而不是 PASS。
+function skip(reason) {
+  skipped++;
+  console.log(`  SKIP  ${reason}`);
+}
+
 const BASE = { max_tokens: 400, messages: [{ role: "user", content: "hi" }] };
 
 // ── 1. 基础调用与响应结构 ───────────────────────────────────
@@ -68,7 +76,7 @@ console.log("=== 1. 基础 message 调用 ===");
 {
   const r = await post({ ...BASE, model: MODEL, messages: [{ role: "user", content: "Reply with exactly: ANTH_OK" }] });
   if (isQuota(r)) {
-    console.log("  SKIP  额度已用尽（5 小时窗口），稍后重跑");
+    skip("额度已用尽（5 小时窗口），稍后重跑");
   } else if (r.status !== 200) {
     console.log("  FAIL", r.status, r.raw.slice(0, 200));
     diffs++;
@@ -92,7 +100,7 @@ console.log("\n=== 2. 版本头（官方：anthropic-version 被忽略）===");
   if (!isQuota(r)) {
     check("任意 anthropic-version 都被接受", r.status === 200, `HTTP ${r.status}`, "忽略该头");
   } else {
-    console.log("  SKIP  额度已用尽");
+    skip("额度已用尽");
   }
 }
 
@@ -109,7 +117,7 @@ console.log("\n=== 3. thinking 开关（官方：budget_tokens 被忽略）===")
     const blocks = (en.json?.content ?? []).map((b) => b.type);
     check("enabled 时返回 thinking 块", blocks.includes("thinking"), blocks.join(", ") || `HTTP ${en.status}`, "thinking");
   } else {
-    console.log("  SKIP  额度已用尽");
+    skip("额度已用尽");
   }
 
   const dis = await post({
@@ -121,7 +129,7 @@ console.log("\n=== 3. thinking 开关（官方：budget_tokens 被忽略）===")
     const blocks = (dis.json?.content ?? []).map((b) => b.type);
     check("disabled 时不返回 thinking 块", dis.status === 200 && !blocks.includes("thinking"), `${blocks.join(", ") || "空"} (HTTP ${dis.status})`, "200 且无 thinking");
   } else {
-    console.log("  SKIP  额度已用尽");
+    skip("额度已用尽");
   }
 }
 
@@ -133,7 +141,7 @@ for (const eff of ["none", "high"]) {
     output_config: { effort: eff },
     messages: [{ role: "user", content: "2+2?" }],
   });
-  if (isQuota(r)) { console.log(`  SKIP  effort=${eff}（额度用尽）`); continue; }
+  if (isQuota(r)) { skip(`effort=${eff}（额度用尽）`); continue; }
   const hasThink = (r.json?.content ?? []).some((b) => b.type === "thinking");
   check(`effort=${eff} 被接受`, r.status === 200, `HTTP ${r.status}, thinking=${hasThink}`,
     eff === "none" ? "关闭思考" : "开启思考");
@@ -153,7 +161,7 @@ console.log("\n=== 5. 官方标为「忽略」的字段不应导致报错 ===");
   if (!isQuota(r)) {
     check("一并传入不报错", r.status === 200, `HTTP ${r.status}`, "全部忽略但不报错");
   } else {
-    console.log("  SKIP  额度已用尽");
+    skip("额度已用尽");
   }
 }
 
@@ -161,7 +169,7 @@ console.log("\n=== 5. 官方标为「忽略」的字段不应导致报错 ===");
 console.log("\n=== 6. claude-* 模型映射（官方：opus→v4-pro，sonnet/haiku→flash）===");
 for (const m of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"]) {
   const r = await post({ ...BASE, max_tokens: 60, model: m });
-  if (isQuota(r)) { console.log(`  SKIP  ${m}（额度用尽）`); continue; }
+  if (isQuota(r)) { skip(`${m}（额度用尽）`); continue; }
   check(`${m} 可用`, r.status === 200, `HTTP ${r.status}`, "映射到对应 DeepSeek 模型");
 }
 
@@ -178,7 +186,7 @@ console.log("\n=== 7. tool_use / tool_result ===");
     messages: [{ role: "user", content: "What's the weather in Tokyo? Use the tool." }],
   });
   if (isQuota(r)) {
-    console.log("  SKIP  额度已用尽");
+    skip("额度已用尽");
   } else {
     const uses = (r.json?.content ?? []).filter((b) => b.type === "tool_use");
     check("返回 tool_use 块", uses.length > 0,
@@ -208,8 +216,8 @@ console.log("\n=== 8. 流式事件序列 ===");
     ...BASE, model: MODEL, max_tokens: 200, stream: true,
     messages: [{ role: "user", content: "count 1 to 5" }],
   });
-  if (r.status === 429) {
-    console.log("  SKIP  额度已用尽");
+  if (isQuota(r)) {
+    skip("额度已用尽");
   } else {
     const events = [...r.raw.matchAll(/^event: (\w+)/gm)].map((m) => m[1]);
     const uniq = [...new Set(events)];
@@ -221,8 +229,9 @@ console.log("\n=== 8. 流式事件序列 ===");
   }
 }
 
-console.log(`\n──────── 共 ${diffs} 处差异 ────────`);
+console.log(`\n──────── 共 ${diffs} 处差异${skipped ? `（${skipped} 组因额度跳过）` : ""} ────────`);
 if (quotaHit) {
   console.log("注意：本次运行遇到 429 额度限制，部分断言被跳过；窗口重置后重跑可得到完整结果。");
 }
-process.exit(diffs > 0 ? 1 : 0);
+// 退出码约定：0 = 通过；1 = 有真实差异；2 = 因额度跳过、结果不完整。
+process.exit(diffs > 0 ? 1 : skipped > 0 ? 2 : 0);
