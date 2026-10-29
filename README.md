@@ -264,13 +264,14 @@ node tools/mock-upstream.mjs --scenario error       # 制造上游错误
 | `GET /user/balance` | 官方 `/user/balance` 形状，返回剩余额度 |
 | `GET /user/quota` | 本项目形状，含 5 小时 / 每周窗口的已用、上限、重置时刻 |
 
-需要回溯请求时加 `--request-log <path>`，每请求写一行 JSON Lines：
+请求日志默认开启，每请求写一行 JSON Lines 到 `~/.commandcode/ccgo2dsapi-requests.log`；
+`--request-log <path>` 改路径，`--request-log off` 关闭：
 
 ```json
 {"ts":"2026-10-21T17:56:59Z","protocol":"openai","model":"deepseek/deepseek-v4.1-flash","stream":false,"status":200,"in":35,"out":8,"reasoning":0,"ms":52}
 ```
 
-默认关闭。上游 429 / 5xx 会自动指数退避重试 2 次（`--retries` 可调），
+上游 429 / 5xx 会自动指数退避重试 2 次（`--retries` 可调），
 额度耗尽等终态错误不重试。
 
 `/user/quota` 的返回示例：
@@ -301,7 +302,7 @@ node tools/mock-upstream.mjs --scenario error       # 制造上游错误
 
 ## 安全
 
-默认只监听 `127.0.0.1`，不要改成 `0.0.0.0`。不要共享密钥——上游按密钥绑定设备指纹，多机并发最容易触发风控。凭据只从 CLI 维护的 `auth.json` 读取，不上传、不缓存。
+默认只监听 `127.0.0.1`，不要改成 `0.0.0.0`。不要共享密钥——上游按密钥绑定设备指纹，多机并发最容易触发风控。凭据只从 CLI 维护的 `auth.json` 读取，不上传；进程内缓存一份，设 `CCGO_NO_CACHE` 可强制重读（密钥轮换后无需重启）。
 
 上游协议层是本项目自研的（`vendor/`），不依赖任何第三方 Command Code 包，也没有需要重打的补丁。协议依据来自
 [官方 CLI 的静态分析](docs/COMMAND-CODE-PROTOCOL.md)。早期版本曾依赖并被 `commandcode-api-proxy`（MIT，
@@ -317,10 +318,10 @@ node tools/mock-upstream.mjs --scenario error       # 制造上游错误
 | TPS 显示 `-` | 尚未测速，按 `T` |
 | TPS 显示 `E` | 测速失败，多为该模型不在套餐内 |
 | 看不到思考内容 | 请求未带 `reasoning_effort`，或值为 `none` |
-| 401 | API Key 填了非 `proxy-managed` 的值 |
+| 401 | 填了非 `proxy-managed` 的 key，且上游拒绝了它 |
 | 403 / model not recognized | 模型名不对或不在套餐内 |
 | 模型反复重新推理同一件事 | 历史思维链没进上下文。必须**同时**满足：请求带 `tools` **且**回传 `reasoning_content`，缺任一条都无效（180 次实验结论，见协议文档） |
-| `maximum context length` | 会话超出 1048576 token 窗口，需精简历史或调小 `max_tokens` |
+| `maximum context length` | 会话超出 1000000 token 窗口，需精简历史或调小 `max_tokens` |
 | 端口被占用 | 启动器会自动接管本项目的旧实例；若占用者是别的程序，用 `-Port` 换端口 |
 
 ## 卸载

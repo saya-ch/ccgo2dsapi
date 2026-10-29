@@ -231,6 +231,17 @@ export function wireToOutputItems(content) {
         status: "completed",
         content: [{ type: "output_text", text: c.text, annotations: [] }],
       });
+    } else if (c.type === "server_tool_result") {
+      // 服务端工具结果在 Responses 里没有独立 item 形状，作为 assistant message 的
+      // output_text 透出，避免静默丢失（上游当前未返回，防御性处理）。
+      const v = c.output && typeof c.output === "object" && "value" in c.output ? c.output.value : c.output;
+      items.push({
+        id: newItemId("msg"),
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: `[server tool ${c.name || c.tool_use_id} result]\n${typeof v === "string" ? v : JSON.stringify(v)}`, annotations: [] }],
+      });
     } else if (c.type === "tool_use") {
       items.push({
         id: newItemId("fc"),

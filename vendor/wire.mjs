@@ -372,12 +372,15 @@ export async function consumeStream(stream, opts = {}) {
     }
 
     if (t === "tool-result") {
+      // 官方只在 providerExecuted === true 时才把它当服务端工具结果（cli.mjs consumeStream）；
+      // 客户端工具的结果不会出现在上游流里。output 官方包成 { type: "json", value }。
+      if (ev.providerExecuted !== true) continue;
       textPart = null;
       content.push({
         type: "server_tool_result",
         tool_use_id: ev.toolCallId ?? "",
         name: ev.toolName ?? "",
-        output: ev.output ?? ev.result,
+        output: { type: "json", value: ev.output ?? ev.result },
         providerExecuted: true,
       });
       continue;

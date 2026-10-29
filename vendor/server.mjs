@@ -188,15 +188,21 @@ async function callUpstream({ model, messages, system, tools, maxTokens, tempera
   const { traceId, spanId } = generateTraceIds();
   const sessionId = generateSessionId();
 
+  // 不支持视觉的模型先剥图；不支持思考的模型不传 reasoning_effort（照官方行为）。
+  const wireMessages = stripUnsupportedImages(model, messages);
+  const effectiveEffort = modelSupportsReasoning(model) && typeof effort === "string" && THINKING_EFFORTS.has(effort)
+    ? effort
+    : undefined;
+
   const body = buildGenerateBody({
     config: makeConfig(),
     model,
-    messages,
+    messages: wireMessages,
     tools,
     system,
     maxTokens: maxTokens ?? DEFAULT_MAX_TOKENS,
     temperature,
-    effort,
+    effort: effectiveEffort,
     permissionMode: "standard",
     mode: "agent",
   });
@@ -489,13 +495,16 @@ function resolveModel(m) {
 // 硬编码只是回落值。运行时优先从上游 /provider/v1/models 拉取，
 // 否则面板（实时拉取）和 /v1/models（硬编码）会数据源不一致：
 // 上游新增模型时面板显示、API 不显示。
+// efforts = 上游支持的 reasoning_effort 档位（观察自官方 CLI 1.87.1 的模型目录；
+// 上游 /provider/v1/models 不返回能力字段，只能内置）。
+// vision 同理来自官方目录的 inputModalities 是否含 image。
 const MODEL_META_FALLBACK = {
-  "deepseek/deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", ctx: 1000000, vision: true },
-  "deepseek/deepseek-v4.1-flash-fast": { name: "DeepSeek V4.1 Flash Fast", ctx: 1000000, vision: true },
-  "deepseek/deepseek-v4-flash": { name: "DeepSeek V4 Flash", ctx: 1000000, vision: false },
-  "deepseek/deepseek-v4-flash-fast": { name: "DeepSeek V4 Flash Fast", ctx: 1000000, vision: false },
-  "deepseek/deepseek-v4-flash-vision-exp": { name: "DeepSeek V4 Flash Vision (exp)", ctx: 1000000, vision: true },
-  "deepseek/deepseek-v4-pro": { name: "DeepSeek V4 Pro", ctx: 1000000, vision: false },
+  "deepseek/deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", ctx: 1000000, vision: true, efforts: ["off", "low", "high", "max"] },
+  "deepseek/deepseek-v4.1-flash-fast": { name: "DeepSeek V4.1 Flash Fast", ctx: 1000000, vision: true, efforts: ["off", "low", "high", "max"] },
+  "deepseek/deepseek-v4-flash": { name: "DeepSeek V4 Flash", ctx: 1000000, vision: false, efforts: ["off", "high", "max"] },
+  "deepseek/deepseek-v4-flash-fast": { name: "DeepSeek V4 Flash Fast", ctx: 1000000, vision: false, efforts: ["low", "high", "max"] },
+  "deepseek/deepseek-v4-flash-vision-exp": { name: "DeepSeek V4 Flash Vision (exp)", ctx: 1000000, vision: true, efforts: ["off", "high", "max"] },
+  "deepseek/deepseek-v4-pro": { name: "DeepSeek V4 Pro", ctx: 1000000, vision: false, efforts: ["off", "high", "max"] },
 };
 
 /** 运行时模型元数据：启动时从上游拉取，失败则用回落值 */
@@ -503,6 +512,48 @@ let MODEL_META = { ...MODEL_META_FALLBACK };
 let MODEL_META_SOURCE = "fallback";
 
 const VISION_HINTS = /vision|v4\.1|multimodal/i;
+
+/** 模型是否支持图片输入（未知名按不支持处理，与官方 supportsVision 的保守取向一致） */
+function modelSupportsVision(model) {
+  const m = MODEL_META[model];
+  return m ? m.vision !== false : false;
+}
+
+/** 模型是否支持思考：官方语义 = reasoningEfforts 非空 */
+function modelSupportsReasoning(model) {
+  const m = MODEL_META[model];
+  return Array.isArray(m?.efforts) && m.efforts.length > 0;
+}
+
+/** 合法 reasoning_effort 档位（观察自官方 CLI 的 On 集合） */
+const THINKING_EFFORTS = new Set(["off", "low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * 对不支持视觉的模型剥离图片，文案照抄官方 CLI 的 stripImages：
+ *   - 最后一条含图消息：每张图换成可被视觉工具读取的 <attached_image index="N"> 占位；
+ *   - 其余含图消息：过滤掉图片；若过滤后为空，补一句 [image omitted: ...]。
+ */
+const IMAGE_OMITTED_TEXT = "[image omitted: the active model is text-only]";
+function attachedImageMarker(index) {
+  return `<attached_image index="${index}">\nAn image is attached here. You cannot view it directly. If a vision tool is available, call it with image_index=${index} to read the image; otherwise tell the user you cannot see images.\n</attached_image>`;
+}
+function stripUnsupportedImages(model, messages) {
+  if (modelSupportsVision(model)) return messages;
+  const hasImage = (msg) => msg?.role === "user" && Array.isArray(msg.content) && msg.content.some((p) => p?.type === "image");
+  if (!messages.some(hasImage)) return messages;
+  let lastWithImage = -1;
+  for (let i = messages.length - 1; i >= 0; i--) { if (hasImage(messages[i])) { lastWithImage = i; break; } }
+  return messages.map((msg, i) => {
+    if (!hasImage(msg)) return msg;
+    if (i === lastWithImage) {
+      let n = 0;
+      const content = msg.content.map((p) => (p?.type === "image" ? { type: "text", text: attachedImageMarker(++n) } : p));
+      return { ...msg, content };
+    }
+    const content = msg.content.filter((p) => p?.type !== "image");
+    return content.length > 0 ? { ...msg, content } : { ...msg, content: [{ type: "text", text: IMAGE_OMITTED_TEXT }] };
+  });
+}
 
 async function refreshModelMeta() {
   try {
@@ -518,10 +569,14 @@ async function refreshModelMeta() {
     const next = {};
     for (const m of list) {
       if (!m?.id || !String(m.id).startsWith("deepseek/")) continue;
+      // 上游 /provider/v1/models 只给 id/name/context_length，不含能力字段；
+      // vision / efforts 以官方目录的回落表为准，未知模型才用正则猜 vision。
+      const fb = MODEL_META_FALLBACK[m.id];
       next[m.id] = {
         name: m.name || m.displayName || m.id,
-        ctx: m.context_length ?? m.contextLength ?? 1000000,
-        vision: VISION_HINTS.test(String(m.id)),
+        ctx: m.context_length ?? m.contextLength ?? fb?.ctx ?? 1000000,
+        vision: fb ? fb.vision : VISION_HINTS.test(String(m.id)),
+        efforts: fb ? fb.efforts : undefined,
       };
     }
     if (Object.keys(next).length === 0) return false;
@@ -1321,7 +1376,10 @@ function handleModels(res) {
     max_output_tokens: 64000,
     input_modalities: m.vision ? ["text", "image"] : ["text"],
     output_modalities: ["text"],
-    effort: { supported_levels: ["low", "high", "max"], default_level: "high" },
+    effort: {
+      supported_levels: Array.isArray(m.efforts) ? m.efforts : [],
+      default_level: m.efforts?.includes("high") ? "high" : (m.efforts?.[0] ?? "high"),
+    },
   }));
   sendJson(res, 200, { object: "list", data });
 }

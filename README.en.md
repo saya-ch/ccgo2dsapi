@@ -265,11 +265,12 @@ Two query endpoints sit alongside the protocols:
 | `GET /user/balance` | the official `/user/balance` shape, remaining credit |
 | `GET /user/quota` | this project's shape, with 5-hour and weekly windows |
 
-For request forensics, add `--request-log <path>`; each request writes one JSON
-Lines record with protocol, model, stream, status, token counts and duration.
-Off by default. Upstream 429 and 5xx responses are retried with exponential
-backoff (twice by default, `--retries` to change); terminal errors such as an
-exhausted quota are not retried.
+For request forensics, logging is on by default: each request writes one JSON
+Lines record with protocol, model, stream, status, token counts and duration to
+`~/.commandcode/ccgo2dsapi-requests.log`. Pass `--request-log <path>` to change
+the path or `--request-log off` to disable it. Upstream 429 and 5xx responses are
+retried with exponential backoff (twice by default, `--retries` to change);
+terminal errors such as an exhausted quota are not retried.
 
 `/user/quota` returns used, cap, percent and reset time per window, plus the
 monthly credit pool.
@@ -300,7 +301,7 @@ monthly credit pool.
 
 ## Security
 
-Listens on `127.0.0.1` only — do not change it to `0.0.0.0`. Do not share the key: upstream binds a device fingerprint to each key, and concurrent use from multiple machines is the most likely trigger for abuse controls. Credentials are read from the `auth.json` the CLI maintains; nothing is uploaded or cached.
+Listens on `127.0.0.1` only — do not change it to `0.0.0.0`. Do not share the key: upstream binds a device fingerprint to each key, and concurrent use from multiple machines is the most likely trigger for abuse controls. Credentials are read from the `auth.json` the CLI maintains; nothing is uploaded, and the key is cached in memory only (set `CCGO_NO_CACHE` to force a re-read after key rotation).
 
 The upstream protocol layer is written in this repository (`vendor/`). There is no third-party
 Command Code package and no patch step. The protocol was derived from
@@ -317,10 +318,10 @@ You accept the risk of account restrictions or plan termination.
 | TPS shows `-` | Not measured yet; press `T` |
 | TPS shows `E` | Measurement failed, usually the model is not in the plan |
 | No reasoning content | Request omitted `reasoning_effort`, or set it to `none` |
-| 401 | API key is something other than `proxy-managed` |
+| 401 | a non-`proxy-managed` key was forwarded and the upstream rejected it |
 | 403 / model not recognized | Wrong model name, or not included in the plan |
 | Model keeps re-deriving the same conclusion | History thinking is not reaching the context. Requires **both**: the request carries `tools` **and** forwards `reasoning_content` — either one alone does nothing (180-trial result, see protocol doc) |
-| `maximum context length` | Conversation exceeds the 1048576-token window; trim history or lower `max_tokens` |
+| `maximum context length` | Conversation exceeds the 1000000-token window; trim history or lower `max_tokens` |
 | Port already in use | The launcher takes over its own stale instance; if another program owns it, pass `-Port` |
 
 ## Uninstall

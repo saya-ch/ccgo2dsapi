@@ -57,7 +57,7 @@ x-cmd-provider-deepseek-internal
 
 | 变化 | 内容 | 本项目处理 |
 |---|---|---|
-| `x-cli-surface` 头 | 新增，取值 `cli` / `ide` / `desktop` 等 | **已实现**（`buildHeaders` 支持 `cliSurface`） |
+| `x-cli-surface` 头 | 新增，取值 `cli` / `ide` / `desktop` 等 | 普通 CLI 模式**不发送**（`setCliSurface` 仅在 ACP/RPC 模式调用）；本项目同样不发 |
 | `/alpha/fingerprint/record` | 设备指纹上报，见下 | 不实现，风险已记录 |
 | `/alpha/agent/generate` | Agent 定义生成，与协议网关无关 | 不适用 |
 
@@ -106,7 +106,7 @@ readTimezone       时区
 | `x-oss-primary-provider` | 无 | 有 |
 | `traceparent` | 自造 | `00-<trace>-<span>-01` 标准 W3C |
 
-代理包的 UA 与官方不一致 —— **这是当前实现的一个偏离**。
+代理包的 UA 与官方不一致；本项目 v1.0.0 起自研，已改用官方值 `cli`，不再偏离。
 
 ## 3. `/alpha/generate` 请求体（观察，`createModelClient.complete`）
 
@@ -400,7 +400,7 @@ Provider API 文档里写明这类是促销：
 | `x-oss-primary-provider` | 无 | 有 | 未知 |
 | `reasoning` 块字段 | `text` | `text` | 一致 |
 | `image.mimeType` | **无** | **有** | 可能是图片处理的关键差异 |
-| 默认 max_tokens | 各接口自带 | `64000` | 一致 |
+| 默认 max_tokens | 各接口自带 | `64000` | 不一致；本项目按 64000 对齐 |
 
 ---
 

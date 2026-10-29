@@ -17,7 +17,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 分析对象 | `command-code@1.50.0` 的 `dist/cli.mjs` |
+| 分析对象 | `command-code@1.87.1` 的 `dist/cli.mjs`（2026-10-22 复核；此前基于 1.50.0） |
 | 获取方式 | `npm i -g command-code` 后读取本机已安装文件 |
 | 分析性质 | 只读静态分析，不反编译、不修改、不再分发 |
 | 记录 | [docs/COMMAND-CODE-PROTOCOL.md](docs/COMMAND-CODE-PROTOCOL.md) |

@@ -11,6 +11,24 @@
   `0` 通过 / `1` 有真实差异 / `2` 未验完（额度不足）。顺带修正 `verify-all` 注释里
   早已废弃的 8788 端口说明。
 
+### 修复（协议能力与文档对齐）
+
+- **`/v1/models` 的 `effort.supported_levels` 按模型给出** —— 之前所有模型都返回
+  `["low","high","max"]`，缺 `off` 且不分模型。现在与官方 CLI 1.87.1 的
+  `reasoningEfforts` 一致（v4.1 系含 `off/low/high/max`，v4-flash 为 `off/high/max` 等）。
+- **不支持视觉的模型收到图片时剥离** —— 按官方 CLI `stripImages` 的文案换成
+  `<attached_image index="N">` 或 `[image omitted: the active model is text-only]`，
+  不再把图片直发上游。
+- **不支持思考或档位非法的模型不再传 `reasoning_effort`** —— 对齐官方
+  `supportsThinking && isThinkingEffort` 的行为。
+- **`tool-result` 流式事件对齐官方** —— 仅 `providerExecuted === true` 时产出
+  `server_tool_result`，`output` 包成 `{ type: "json", value }`；三套响应把它以文本
+  透出，不再静默丢弃（上游当前不返回该事件，属防御性处理）。
+- **文档纠错** —— 请求日志实际默认开启（原写「默认关闭」）；DeepSeek 上下文窗口是
+  1000000 而非 1048576；凭据为进程内缓存（原写「不缓存」）；`x-cli-surface` 在普通
+  CLI 模式不发送；分析对象版本为 1.87.1（NOTICES 原写 1.50.0）；401 与 max_tokens
+  的表述一并修正。
+
 ## v1.2.0
 
 会话中断、请求被拒、模型反复推理这三类问题的根因修复。其中前三项是会直接

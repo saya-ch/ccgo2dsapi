@@ -81,11 +81,11 @@ console.log("\n=== 3. /v1/models 元数据（官方含 context_window/max_output
   show("只返回 DeepSeek 模型", ids.length > 0 && others.length === 0,
     `deepseek ${ids.length - others.length} 个 / 其它 ${others.length} 个`,
     "官方只返回自家 2 个模型");
-  show("含 context_window", m?.context_window !== undefined, String(m?.context_window), "1048576");
-  show("含 max_output_tokens", m?.max_output_tokens !== undefined, String(m?.max_output_tokens), "393216");
-  show("含 effort.supported_levels", !!m?.effort?.supported_levels, JSON.stringify(m?.effort), `["low","high","max"]`);
-  show("含 name 展示名", !!m?.name, String(m?.name), "DeepSeek-V4.1-Flash");
-  show("含 input_modalities", !!m?.input_modalities, JSON.stringify(m?.input_modalities), `["text","image"]`);
+  show("含 context_window", m?.context_window !== undefined, String(m?.context_window), "1000000");
+  show("含 max_output_tokens", m?.max_output_tokens !== undefined, String(m?.max_output_tokens), "上游未下发（默认 64000）");
+  show("含 effort.supported_levels", !!m?.effort?.supported_levels, JSON.stringify(m?.effort), `["off","high","max"]（v4-flash）`);
+  show("含 name 展示名", !!m?.name, String(m?.name), "DeepSeek V4 Flash");
+  show("含 input_modalities", !!m?.input_modalities, JSON.stringify(m?.input_modalities), `["text"]（v4-flash 不支持视觉）`);
 }
 
 // ── 4. usage 缓存字段 ───────────────────────────────────────

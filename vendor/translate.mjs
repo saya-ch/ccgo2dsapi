@@ -132,6 +132,12 @@ export function wireToOpenAIMessage(content) {
   for (const c of content || []) {
     if (c.type === "text") text += c.text ?? "";
     else if (c.type === "thinking") reasoning += c.thinking;
+    else if (c.type === "server_tool_result") {
+      // 上游服务端工具（web_search 等）的结果在 OpenAI 协议里没有对应块；
+      // 以文本透出避免静默丢失（上游当前未返回该事件，属防御性处理）。
+      const v = c.output && typeof c.output === "object" && "value" in c.output ? c.output.value : c.output;
+      text += `\n[server tool ${c.name || c.tool_use_id} result]\n${typeof v === "string" ? v : JSON.stringify(v)}\n`;
+    }
     else if (c.type === "tool_use") {
       toolCalls.push({
         id: c.id,
@@ -285,6 +291,12 @@ export function wireToAnthropicBlocks(content) {
   for (const c of content || []) {
     if (c.type === "thinking") blocks.push({ type: "thinking", thinking: c.thinking, signature: c.signature || "" });
     else if (c.type === "text") blocks.push({ type: "text", text: c.text });
+    else if (c.type === "server_tool_result") {
+      // Anthropic 的 tool_result 只能出现在 user 消息，assistant 响应里放不下；
+      // 以 text 块透出服务端工具结果，避免丢失（上游当前未返回，防御性处理）。
+      const v = c.output && typeof c.output === "object" && "value" in c.output ? c.output.value : c.output;
+      blocks.push({ type: "text", text: `[server tool ${c.name || c.tool_use_id} result]\n${typeof v === "string" ? v : JSON.stringify(v)}` });
+    }
     else if (c.type === "tool_use") blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input ?? {} });
   }
   return blocks;
